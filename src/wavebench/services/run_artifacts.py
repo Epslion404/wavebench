@@ -20,15 +20,19 @@ class RunStepRecord:
     status: str
     fields: dict[str, Any]
     artifact: dict[str, Any]
+    id: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "index": self.index,
             "kind": self.kind,
             "status": self.status,
             "fields": self.fields,
             "artifact": self.artifact,
         }
+        if self.id is not None:
+            result["id"] = self.id
+        return result
 
 
 def write_step_record(steps_dir: Path, record: RunStepRecord) -> None:

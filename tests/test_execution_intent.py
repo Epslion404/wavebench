@@ -54,6 +54,67 @@ def test_execution_intent_is_stable_and_does_not_expose_resources() -> None:
         assert "TCPIP::" not in json.dumps(first.as_dict())
 
 
+def test_analysis_pipeline_intent_is_explicitly_offline_and_carries_step_ids() -> None:
+    with TemporaryDirectory() as tmp:
+        plan = load_run_plan(
+            write_plan(
+                tmp,
+                """
+[[steps]]
+id = "capture_main"
+kind = "scope.capture"
+save_npy = true
+
+[[steps]]
+id = "spectrum_main"
+kind = "analysis.pipeline"
+source = { step = "capture_main" }
+operations = [
+  { op = "remove_dc" },
+  { op = "fft" },
+  { op = "measure", metrics = ["peak_frequency_hz"] },
+]
+""",
+            )
+        )
+
+        intent = build_execution_intent(plan, make_config(tmp))
+
+        capture, analysis = intent.operations
+        assert capture["step_id"] == "capture_main"
+        assert analysis["step_id"] == "spectrum_main"
+        assert analysis["operation"] == "analysis.pipeline"
+        assert analysis["instrument_kind"] is None
+        assert analysis["effect"] == "offline"
+        assert analysis["lease_mode"] == "none"
+        assert analysis["parameters"]["source"] == {"step": "capture_main"}
+        assert analysis["parameters"]["operations"][1] == {"op": "fft"}
+
+
+def test_step_id_changes_plan_and_intent_digest_without_changing_legacy_shape() -> None:
+    with TemporaryDirectory() as tmp:
+        legacy = _sleep_plan(tmp)
+        identified = load_run_plan(
+            write_plan(
+                tmp,
+                """
+[[steps]]
+id = "wait"
+kind = "sleep"
+duration_s = 0.01
+""",
+            )
+        )
+
+        legacy_intent = build_execution_intent(legacy, make_config(tmp))
+        identified_intent = build_execution_intent(identified, make_config(tmp))
+
+        assert legacy_intent.plan_digest != identified_intent.plan_digest
+        assert legacy_intent.intent_digest != identified_intent.intent_digest
+        assert "step_id" not in legacy_intent.operations[0]
+        assert identified_intent.operations[0]["step_id"] == "wait"
+
+
 def test_execution_intent_rejects_plan_or_config_change() -> None:
     with TemporaryDirectory() as tmp:
         plan = _sleep_plan(tmp)

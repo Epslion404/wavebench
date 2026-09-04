@@ -116,11 +116,11 @@ def fake_capture(
     voltage_mean_v: float = 0.0,
     duty_cycle: float | None = None,
     frequency_error_ratio: float | None = 0.0,
+    waveform_frequency_hz: float = 1000.0,
 ):
     package = Path(tmp) / name
     package.mkdir()
     metadata = package / "metadata.json"
-    metadata.write_text("{}", encoding="utf-8")
     summary = {
         "quality_warnings": warnings or [],
         "frequency_estimate_hz": frequency_hz,
@@ -134,8 +134,17 @@ def fake_capture(
     waveform_path = package / "ch1.npy"
     sample_rate = 100_000.0
     times = np.arange(4096) / sample_rate
-    volts = np.sin(2 * np.pi * 1000.0 * times) + 0.1 * np.sin(2 * np.pi * 2000.0 * times)
+    volts = np.sin(2 * np.pi * waveform_frequency_hz * times) + 0.1 * np.sin(
+        2 * np.pi * 2 * waveform_frequency_hz * times
+    )
     np.save(waveform_path, np.column_stack((times, volts)))
+    metadata.write_text(
+        json.dumps({
+            "operation": {"channel": 1},
+            "files": {"npy": str(waveform_path)},
+        }),
+        encoding="utf-8",
+    )
     waveform = SimpleNamespace(summary=lambda **kwargs: summary)
     return SimpleNamespace(package_dir=package, metadata_path=metadata, waveform=waveform, npy_path=waveform_path)
 
@@ -1233,6 +1242,40 @@ auto_recover = true
                 self.assertEqual(artifact["quality"]["status"], "ok")
                 self.assertEqual(artifact["quality_recovery"]["max_auto_recover_attempts"], 2)
                 self.assertIn("low_points_per_cycle", artifact["quality_recovery"]["attempts"][0]["quality"]["warnings"][0])
+
+    def test_scope_capture_fft_uses_final_recovery_capture(self):
+        with TemporaryDirectory() as tmp:
+            plan = load_run_plan(
+                write_plan(
+                    tmp,
+                    """
+[[steps]]
+kind = "scope.capture"
+label = "recovered_fft"
+quality_gate = true
+auto_recover = true
+
+[steps.expect_fft]
+peak_frequency_hz = { min = 1980.0, max = 2020.0 }
+""",
+                )
+            )
+            first = fake_capture(tmp, "initial", ["low_points_per_cycle: too sparse"])
+            accepted = fake_capture(
+                tmp,
+                "accepted",
+                [],
+                waveform_frequency_hz=2000.0,
+            )
+            with patch("wavebench.services.run_service.ScopeService") as scope_cls:
+                scope_cls.return_value.capture_waveform.side_effect = [first, accepted]
+
+                result = RunService(config=make_config(tmp), logger=CommandLogger()).run(plan)
+
+                artifact = result.steps[0].artifact
+                self.assertEqual(artifact["package"], str(accepted.package_dir))
+                self.assertEqual(artifact["fft"]["status"], "ok")
+                self.assertEqual(artifact["expect_fft"]["status"], "ok")
 
     def test_scope_capture_uses_configured_recovery_attempts_and_accepts_consistency(self):
         with TemporaryDirectory() as tmp:

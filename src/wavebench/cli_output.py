@@ -281,10 +281,11 @@ def _print_scpi_probe_result(result: ScpiProbeResult) -> None:
     print(f"idn_match={'yes' if result.matched else 'no'}")
 
 def _format_step_summary(step: RunStep) -> str:
+    identity = f" id={step.id}" if step.id is not None else ""
     if not step.fields:
-        return f"{step.index}: {step.kind}"
+        return f"{step.index}: {step.kind}{identity}"
     fields = " ".join(f"{key}={value}" for key, value in step.fields.items())
-    return f"{step.index}: {step.kind} {fields}"
+    return f"{step.index}: {step.kind}{identity} {fields}"
 
 
 def _print_run_plan_summary(plan: RunPlan) -> None:

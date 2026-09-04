@@ -14,6 +14,7 @@ class ScopeSafetyService(Protocol):
 
 
 EXECUTABLE_STEP_KINDS = {
+    "analysis.pipeline",
     "power.status",
     "power.set",
     "power.output",

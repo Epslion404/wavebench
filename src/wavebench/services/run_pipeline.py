@@ -1,0 +1,414 @@
+from __future__ import annotations
+
+import csv
+from hashlib import sha256
+import json
+import os
+from pathlib import Path
+import tempfile
+from typing import Any, Iterator
+
+import numpy as np
+
+from wavebench.data.signal_pipeline import (
+    FrequencySignal,
+    TimeSignal,
+    detrend_linear,
+    fft_signal,
+    measure_frequency,
+    measure_time,
+    remove_dc,
+    validate_waveform,
+    window_signal,
+)
+from wavebench.errors import DataError, error_envelope
+from wavebench.services.run_analysis import evaluate_expect
+from wavebench.services.run_artifacts import RunStepRecord
+from wavebench.services.run_plan import RunStep
+
+
+ANALYSIS_PIPELINE_SCHEMA = "wavebench.analysis_pipeline.v1"
+ANALYSIS_METRICS_SCHEMA = "wavebench.analysis_metrics.v1"
+
+
+def execute_analysis_pipeline(
+    *,
+    run_dir: Path,
+    step: RunStep,
+    source_step: RunStep,
+    source_record: RunStepRecord | None,
+) -> dict[str, Any]:
+    processing_dir = run_dir / "processing" / (
+        f"{step.index:02d}_{step.id or 'analysis_pipeline'}"
+    )
+    processing_dir.mkdir(parents=True, exist_ok=False)
+    metrics_path = processing_dir / "metrics.json"
+    manifest_path = processing_dir / "manifest.json"
+
+    operations = step.fields["operations"]
+    metrics: dict[str, float | None] = {
+        metric: None
+        for operation in operations
+        if operation["op"] == "measure"
+        for metric in operation["metrics"]
+    }
+    warnings: list[str] = []
+    exports: list[dict[str, Any]] = []
+    stages: list[dict[str, Any]] = []
+    sampling: dict[str, Any] | None = None
+    window: dict[str, Any] | None = None
+    source: dict[str, Any] = {
+        "step": source_step.id,
+        "step_index": source_step.index,
+        "status": source_record.status if source_record is not None else "unavailable",
+    }
+    failure: dict[str, Any] | None = None
+    failed_stage: str | None = None
+
+    try:
+        _, source_details, waveform = _load_source_waveform(
+            run_dir=run_dir,
+            source_step=source_step,
+            source_record=source_record,
+        )
+        source.update(source_details)
+        signal: TimeSignal | FrequencySignal = validate_waveform(waveform)
+        sampling = _time_sampling(signal)
+        stages.append({"stage": "source", "status": "ok", "domain": "time"})
+
+        for operation_index, operation in enumerate(operations):
+            op = operation["op"]
+            stage = {
+                "index": operation_index,
+                "op": op,
+                "status": "running",
+                "input_domain": _domain(signal),
+            }
+            stages.append(stage)
+            try:
+                if op == "remove_dc":
+                    assert isinstance(signal, TimeSignal)
+                    signal = remove_dc(signal)
+                elif op == "detrend":
+                    assert isinstance(signal, TimeSignal)
+                    signal = detrend_linear(signal)
+                elif op == "window":
+                    assert isinstance(signal, TimeSignal)
+                    signal = window_signal(signal, operation["name"])
+                    window = {
+                        "name": signal.window_name,
+                        "coherent_gain": signal.coherent_gain,
+                    }
+                elif op == "fft":
+                    assert isinstance(signal, TimeSignal)
+                    signal = fft_signal(signal)
+                    sampling.update({
+                        "sample_interval_s": signal.sample_interval_s,
+                        "sample_rate_hz": signal.sample_rate_hz,
+                        "resolution_hz": signal.resolution_hz,
+                    })
+                elif op == "measure":
+                    if isinstance(signal, TimeSignal):
+                        measured = measure_time(signal, operation["metrics"])
+                        operation_warnings: list[str] = []
+                    else:
+                        measured, operation_warnings = measure_frequency(
+                            signal, operation["metrics"]
+                        )
+                    metrics.update(measured)
+                    _extend_unique(warnings, operation_warnings)
+                    if operation_warnings:
+                        stage["warnings"] = operation_warnings
+                elif op == "export":
+                    exported: list[dict[str, Any]] = []
+                    for item in _export_signal(
+                        run_dir=run_dir,
+                        processing_dir=processing_dir,
+                        signal=signal,
+                        name=operation["name"],
+                        formats=operation["formats"],
+                    ):
+                        exported.append(item)
+                        exports.append(item)
+                    stage["exports"] = [item["path"] for item in exported]
+                else:  # pragma: no cover - RunPlan validation owns this invariant
+                    raise DataError(f"unsupported analysis operation: {op}")
+            except Exception:
+                stage["status"] = "failed"
+                raise
+            stage["status"] = "ok"
+            stage["output_domain"] = _domain(signal)
+    except Exception as exc:  # noqa: BLE001 - analysis failures are step artifacts
+        failed_stage = _failed_stage(stages)
+        failure = error_envelope(
+            exc,
+            operation=(
+                f"analysis.pipeline.{failed_stage}"
+                if failed_stage is not None
+                else "analysis.pipeline"
+            ),
+        )
+        if not stages or stages[0].get("stage") != "source":
+            stages.insert(0, {"stage": "source", "status": "failed"})
+        for operation_index in range(len(stages) - 1, len(operations)):
+            operation = operations[operation_index]
+            stages.append({
+                "index": operation_index,
+                "op": operation["op"],
+                "status": "skipped",
+            })
+
+    status = "failed" if failure is not None else "ok"
+    partial = failure is not None and (
+        bool(exports)
+        or any(stage.get("status") == "ok" and "index" in stage for stage in stages)
+    )
+    metrics_document = {
+        "schema": ANALYSIS_METRICS_SCHEMA,
+        "metrics": metrics,
+    }
+    manifest: dict[str, Any] = {
+        "schema": ANALYSIS_PIPELINE_SCHEMA,
+        "status": status,
+        "partial": partial,
+        "source": source,
+        "operations": operations,
+        "stages": stages,
+        "sampling": sampling,
+        "window": window,
+        "metrics": _derived_relative(metrics_path, run_dir),
+        "warnings": warnings,
+        "exports": exports,
+        "definitions": {
+            "amplitude": "single_sided_peak_v",
+            "noise_floor_v": "median_non_dc_non_peak_bin_peak_amplitude_v",
+            "thd_ratio": "rss_in_band_harmonic_2_through_5_over_fundamental_peak",
+        },
+    }
+    if failed_stage is not None:
+        manifest["failed_stage"] = failed_stage
+    if failure is not None:
+        manifest["error"] = failure
+
+    _atomic_write_json(metrics_path, metrics_document)
+    _atomic_write_json(manifest_path, manifest)
+
+    pipeline_artifact: dict[str, Any] = {
+        "schema": ANALYSIS_PIPELINE_SCHEMA,
+        "status": status,
+        "manifest": _derived_relative(manifest_path, run_dir),
+        "metrics": _derived_relative(metrics_path, run_dir),
+        "source_step": source_step.id,
+        "source_status": source["status"],
+        "operations": operations,
+        "warnings": warnings,
+        "exports": exports,
+    }
+    if failed_stage is not None:
+        pipeline_artifact["failed_stage"] = failed_stage
+    if failure is not None:
+        pipeline_artifact["error"] = failure
+
+    artifact: dict[str, Any] = {
+        "analysis_pipeline": pipeline_artifact,
+        "metrics": metrics,
+    }
+    if "expect" in step.fields:
+        artifact["expect"] = evaluate_expect(metrics, step.fields["expect"])
+    return artifact
+
+
+def _load_source_waveform(
+    *,
+    run_dir: Path,
+    source_step: RunStep,
+    source_record: RunStepRecord | None,
+) -> tuple[Path, dict[str, Any], np.ndarray]:
+    if source_record is None:
+        raise DataError(f"source capture step {source_step.id!r} was not executed")
+    package_text = source_record.artifact.get("package")
+    metadata_text = source_record.artifact.get("metadata")
+    if not isinstance(package_text, str) or not package_text:
+        raise DataError(f"source capture step {source_step.id!r} has no package artifact")
+    if not isinstance(metadata_text, str) or not metadata_text:
+        raise DataError(f"source capture step {source_step.id!r} has no metadata artifact")
+
+    package = Path(package_text).resolve()
+    if not package.is_dir():
+        raise DataError(f"source capture package is unavailable: {package}")
+    metadata_path = _resolve_package_member(package, metadata_text, label="metadata")
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise DataError(f"source capture metadata is unreadable: {metadata_path}: {exc}") from exc
+    if not isinstance(metadata, dict):
+        raise DataError("source capture metadata must be a JSON object")
+    files = metadata.get("files")
+    if not isinstance(files, dict):
+        raise DataError("source capture metadata has no files table")
+    npy_text = files.get("npy")
+    if not isinstance(npy_text, str) or not npy_text:
+        raise DataError("source capture metadata has no NPY artifact")
+    waveform_path = _resolve_package_member(package, npy_text, label="NPY")
+    try:
+        waveform = np.load(waveform_path, allow_pickle=False)
+    except Exception as exc:  # noqa: BLE001 - NumPy load errors become structured data errors
+        raise DataError(f"source capture NPY is unreadable: {waveform_path}: {exc}") from exc
+
+    return waveform_path, {
+        "package": _run_relative(package, run_dir),
+        "metadata": _run_relative(metadata_path, run_dir),
+        "npy": _run_relative(waveform_path, run_dir),
+        "npy_sha256": _sha256_file(waveform_path),
+    }, waveform
+
+
+def _resolve_package_member(package: Path, raw: str, *, label: str) -> Path:
+    candidate = Path(raw)
+    if ".." in candidate.parts:
+        raise DataError(f"source capture {label} path must not contain '..'")
+    candidates = [candidate] if candidate.is_absolute() else [Path.cwd() / candidate, package / candidate]
+    package = package.resolve()
+    for unresolved in candidates:
+        resolved = unresolved.resolve()
+        try:
+            resolved.relative_to(package)
+        except ValueError:
+            continue
+        if resolved.is_file():
+            return resolved
+    raise DataError(f"source capture {label} path escapes its capture package or is unavailable")
+
+
+def _export_signal(
+    *,
+    run_dir: Path,
+    processing_dir: Path,
+    signal: TimeSignal | FrequencySignal,
+    name: str,
+    formats: list[str],
+) -> Iterator[dict[str, Any]]:
+    exports_dir = processing_dir / "exports"
+    exports_dir.mkdir(parents=True, exist_ok=True)
+    if isinstance(signal, TimeSignal):
+        columns = ["time_s", "voltage_v"]
+    else:
+        columns = ["frequency_hz", "real_v", "imaginary_v", "amplitude_v"]
+    data = signal.as_array()
+    for file_format in formats:
+        target = exports_dir / f"{name}.{file_format}"
+        if target.exists():  # pragma: no cover - parser prevents duplicate export names
+            raise DataError(f"analysis export already exists: {target.name}")
+        if file_format == "npy":
+            _atomic_write_npy(target, data)
+        elif file_format == "csv":
+            _atomic_write_csv(target, columns, data)
+        else:  # pragma: no cover - RunPlan validation owns this invariant
+            raise DataError(f"unsupported analysis export format: {file_format}")
+        yield {
+            "name": name,
+            "format": file_format,
+            "path": _derived_relative(target, run_dir),
+            "sha256": _sha256_file(target),
+            "columns": columns,
+        }
+
+
+def _atomic_write_json(path: Path, value: dict[str, Any]) -> None:
+    encoded = (
+        json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+    ).encode("utf-8")
+    _atomic_write_bytes(path, encoded)
+
+
+def _atomic_write_npy(path: Path, data: np.ndarray) -> None:
+    temporary = _temporary_path(path)
+    try:
+        with temporary.open("wb") as file:
+            np.save(file, data, allow_pickle=False)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _atomic_write_csv(path: Path, columns: list[str], data: np.ndarray) -> None:
+    temporary = _temporary_path(path)
+    try:
+        with temporary.open("w", newline="", encoding="utf-8") as file:
+            writer = csv.writer(file)
+            writer.writerow(columns)
+            writer.writerows(data.tolist())
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    temporary = _temporary_path(path)
+    try:
+        with temporary.open("xb") as file:
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _temporary_path(path: Path) -> Path:
+    descriptor, raw_path = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    os.close(descriptor)
+    temporary = Path(raw_path)
+    temporary.unlink()
+    return temporary
+
+
+def _sha256_file(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as file:
+        while chunk := file.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _time_sampling(signal: TimeSignal) -> dict[str, Any]:
+    return {
+        "samples": int(signal.time_s.size),
+        "time_start_s": float(signal.time_s[0]),
+        "time_stop_s": float(signal.time_s[-1]),
+        "strictly_increasing": True,
+    }
+
+
+def _domain(signal: TimeSignal | FrequencySignal) -> str:
+    return "time" if isinstance(signal, TimeSignal) else "frequency"
+
+
+def _failed_stage(stages: list[dict[str, Any]]) -> str | None:
+    for stage in reversed(stages):
+        if stage.get("status") == "failed":
+            if "index" in stage:
+                return f"operations[{stage['index']}]"
+            return str(stage.get("stage", "source"))
+    return "source"
+
+
+def _run_relative(path: Path, run_dir: Path) -> str:
+    return Path(os.path.relpath(path.resolve(), run_dir.resolve())).as_posix()
+
+
+def _derived_relative(path: Path, run_dir: Path) -> str:
+    try:
+        return path.resolve().relative_to(run_dir.resolve()).as_posix()
+    except ValueError as exc:  # pragma: no cover - paths are constructed below run_dir
+        raise DataError("analysis derived path escapes the run directory") from exc
+
+
+def _extend_unique(target: list[str], values: list[str]) -> None:
+    for value in values:
+        if value not in target:
+            target.append(value)

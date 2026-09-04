@@ -808,6 +808,7 @@ def _run_plan_payload(plan) -> dict[str, object]:
                 "index": step.index,
                 "kind": step.kind,
                 "fields": _json_payload(step.fields),
+                **({"id": step.id} if step.id is not None else {}),
             }
             for step in plan.steps
         ],

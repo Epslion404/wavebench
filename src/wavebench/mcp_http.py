@@ -167,7 +167,12 @@ def _run_check_tool(arguments: dict[str, Any], config_path: Path) -> dict[str, A
             "name": plan.name,
             "label": plan.label,
             "steps": [
-                {"index": step.index, "kind": step.kind, "fields": step.fields}
+                {
+                    "index": step.index,
+                    "kind": step.kind,
+                    "fields": step.fields,
+                    **({"id": step.id} if step.id is not None else {}),
+                }
                 for step in plan.steps
             ],
             "safety": {

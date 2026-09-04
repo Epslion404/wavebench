@@ -12,8 +12,13 @@ Top-level tables:
   [safety] optional: scope_guard_channel, require_scope_coupling_not, allow_50ohm, safety_gate, off_source_channels, off_power_channels
   [restore] optional: source_state, source_channel, source_channels
   [[steps]] required: kind
+  [[steps]] optional structural field: id matching ^[a-z][a-z0-9_-]{0,63}$
 
 Supported step kinds:
+  - analysis.pipeline
+      required: source, operations
+      optional : expect, on_failure
+      note     : Process one earlier scope.capture NPY after all hardware sessions close. Uses a validated linear NumPy operator list and never opens an instrument.
   - dmm.read
       required: -
       optional : expect, function, on_failure, safety_gate
@@ -237,4 +242,8 @@ Supported step kinds:
 scope.capture [steps.expect_fft] metrics:
   FFT checks analyze the saved NPY waveform.
   Common metrics: peak_frequency_hz, peak_amplitude_v, thd_ratio, harmonic_2_amplitude_v.
+
+analysis.pipeline metrics:
+  Time domain: voltage_min_v, voltage_max_v, voltage_mean_v, voltage_rms_v, voltage_vpp_v.
+  Frequency domain: peak_frequency_hz, peak_amplitude_v, noise_floor_v, thd_ratio, and harmonic_2 through harmonic_5 frequency/amplitude fields.
 ```

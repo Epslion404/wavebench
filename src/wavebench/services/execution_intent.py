@@ -99,6 +99,8 @@ def build_execution_intent(plan: RunPlan, config: WaveBenchConfig) -> ExecutionI
                 "safety_gate": _safe_parameters(fields.get("safety_gate", {})),
             },
         }
+        if step.id is not None:
+            entry["step_id"] = step.id
         operations.append(entry)
 
     safety = _safe_parameters(asdict(plan.safety))

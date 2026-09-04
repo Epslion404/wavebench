@@ -9,6 +9,10 @@ from typing import Any
 import tomllib
 
 from wavebench.config import normalize_waveform_points
+from wavebench.data.signal_pipeline import (
+    ANALYSIS_FREQUENCY_METRICS,
+    ANALYSIS_TIME_METRICS,
+)
 from wavebench.errors import ConfigError
 from wavebench.services.frequency_response import FIT_METHODS
 from wavebench.services.frequency_response_adaptive import normalize_frequency_response_adaptive
@@ -17,6 +21,7 @@ from wavebench.services.frequency_response_calibration import normalize_frequenc
 
 
 ALLOWED_STEP_KINDS = {
+    "analysis.pipeline",
     "scope.auto",
     "scope.capture",
     "sweep.frequency_response",
@@ -75,8 +80,11 @@ ALLOWED_STEP_KINDS = {
 
 _SOURCE_STORAGE_TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,96}$")
 _SOURCE_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_STEP_ID = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+_ANALYSIS_EXPORT_NAME = _STEP_ID
 
 _REQUIRED_FIELDS = {
+    "analysis.pipeline": ("source", "operations"),
     "power.set": ("voltage_v", "current_limit_a"),
     "power.output": ("state",),
     "source.set_freq": ("frequency_hz",),
@@ -172,6 +180,7 @@ _REQUIRED_FIELDS = {
 }
 
 _OPTIONAL_FIELDS = {
+    "analysis.pipeline": {"expect", "on_failure"},
     "scope.auto": {"on_failure"},
     "scope.capture": {
         "channel",
@@ -314,11 +323,14 @@ _OPTIONAL_FIELDS = {
 # Failure handling is a common contract for every executable step.  Keeping the
 # fields in the schema table makes ``run schema`` and unknown-key diagnostics stay
 # in sync as new step kinds are added.
-for _step_fields in _OPTIONAL_FIELDS.values():
-    _step_fields.update({"on_failure", "safety_gate"})
+for _step_kind, _step_fields in _OPTIONAL_FIELDS.items():
+    _step_fields.add("on_failure")
+    if _step_kind != "analysis.pipeline":
+        _step_fields.add("safety_gate")
 
 
 _STEP_NOTES = {
+    "analysis.pipeline": "Process one earlier scope.capture NPY after all hardware sessions close. Uses a validated linear NumPy operator list and never opens an instrument.",
     "scope.auto": "Explicit RTM2032 AUToscale. It changes front-panel settings and is never inserted implicitly.",
     "scope.capture": "Trigger one acquisition, write a capture package, and optionally evaluate quality/expect checks. Use target_vpp or vertical_scale_v_per_div to fit the waveform vertically before capture.",
     "sweep.frequency_response": "Sweep a source through discrete frequencies, capture reference and response channels in one acquisition per point, and write a Bode response CSV.",
@@ -416,6 +428,7 @@ def format_run_plan_schema() -> str:
         "  [safety] optional: scope_guard_channel, require_scope_coupling_not, allow_50ohm, safety_gate, off_source_channels, off_power_channels",
         "  [restore] optional: source_state, source_channel, source_channels",
         "  [[steps]] required: kind",
+        "  [[steps]] optional structural field: id matching ^[a-z][a-z0-9_-]{0,63}$",
         "",
         "Supported step kinds:",
     ]
@@ -435,6 +448,10 @@ def format_run_plan_schema() -> str:
         "scope.capture [steps.expect_fft] metrics:",
         "  FFT checks analyze the saved NPY waveform.",
         "  Common metrics: peak_frequency_hz, peak_amplitude_v, thd_ratio, harmonic_2_amplitude_v.",
+        "",
+        "analysis.pipeline metrics:",
+        "  Time domain: voltage_min_v, voltage_max_v, voltage_mean_v, voltage_rms_v, voltage_vpp_v.",
+        "  Frequency domain: peak_frequency_hz, peak_amplitude_v, noise_floor_v, thd_ratio, and harmonic_2 through harmonic_5 frequency/amplitude fields.",
     ])
     return "\n".join(lines)
 
@@ -464,6 +481,7 @@ class RunStep:
     index: int
     kind: str
     fields: dict[str, Any]
+    id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -503,6 +521,7 @@ def load_run_plan(path: str | Path) -> RunPlan:
         raise ConfigError("run plan requires at least one [[steps]] entry")
     steps = [_parse_step(index, item) for index, item in enumerate(steps_raw)]
     _validate_frequency_response_steps(steps)
+    _validate_analysis_steps(steps)
     return RunPlan(path=plan_path, name=name, label=label, safety=safety, restore=restore, steps=steps)
 
 
@@ -639,7 +658,7 @@ def _parse_step(index: int, raw: Any) -> RunStep:
         )
 
     schema = STEP_SCHEMAS[kind]
-    allowed_fields = {"kind", *schema.required, *schema.optional}
+    allowed_fields = {"id", "kind", *schema.required, *schema.optional}
     _reject_unknown_keys(table, allowed_fields, f"steps[{index}]")
     for field in schema.required:
         if field not in table:
@@ -651,9 +670,10 @@ def _parse_step(index: int, raw: Any) -> RunStep:
                 "Run `python -m wavebench run schema` for examples."
             )
 
-    fields = {key: value for key, value in table.items() if key != "kind"}
+    step_id = _normalize_step_id(table["id"], f"steps[{index}].id") if "id" in table else None
+    fields = {key: value for key, value in table.items() if key not in {"id", "kind"}}
     _normalize_step_fields(index, kind, fields)
-    return RunStep(index=index, kind=kind, fields=fields)
+    return RunStep(index=index, kind=kind, fields=fields, id=step_id)
 
 
 def _normalize_step_fields(index: int, kind: str, fields: dict[str, Any]) -> None:
@@ -669,7 +689,9 @@ def _normalize_step_fields(index: int, kind: str, fields: dict[str, Any]) -> Non
         )
     if "channel" in fields:
         fields["channel"] = _positive_int(fields["channel"], f"{prefix}.channel")
-    if kind == "scope.capture":
+    if kind == "analysis.pipeline":
+        _normalize_analysis_pipeline_fields(prefix, fields)
+    elif kind == "scope.capture":
         if "label" in fields:
             fields["label"] = _non_empty_str(fields["label"], f"{prefix}.label")
         if "points" in fields:
@@ -1182,6 +1204,199 @@ def _validate_frequency_response_steps(steps: list[RunStep]) -> None:
         if label in labels:
             raise ConfigError(f"sweep.frequency_response labels must be unique: {label!r}")
         labels.add(label)
+
+
+def _validate_analysis_steps(steps: list[RunStep]) -> None:
+    by_id: dict[str, RunStep] = {}
+    for step in steps:
+        if step.id is None:
+            continue
+        if step.id in by_id:
+            raise ConfigError(f"duplicate step id: {step.id!r}")
+        by_id[step.id] = step
+
+    for step in steps:
+        if step.kind != "analysis.pipeline":
+            continue
+        source_id = step.fields["source"]["step"]
+        source = by_id.get(source_id)
+        if source is None:
+            raise ConfigError(
+                f"steps[{step.index}].source references unknown step id {source_id!r}"
+            )
+        if source.index >= step.index:
+            raise ConfigError(
+                f"steps[{step.index}].source must reference an earlier step"
+            )
+        if source.kind != "scope.capture":
+            raise ConfigError(
+                f"steps[{step.index}].source must reference a scope.capture step"
+            )
+        if source.fields.get("save_npy") is not True:
+            raise ConfigError(
+                f"steps[{step.index}].source scope.capture must explicitly set save_npy = true"
+            )
+
+    analysis_started = False
+    for step in steps:
+        if step.kind == "analysis.pipeline":
+            analysis_started = True
+        elif analysis_started:
+            raise ConfigError("analysis.pipeline steps must form a contiguous suffix of the plan")
+
+
+def _normalize_step_id(value: Any, name: str) -> str:
+    if not isinstance(value, str) or _STEP_ID.fullmatch(value) is None:
+        raise ConfigError(f"{name} must match ^[a-z][a-z0-9_-]{{0,63}}$")
+    return value
+
+
+def _normalize_analysis_pipeline_fields(prefix: str, fields: dict[str, Any]) -> None:
+    source = _table(fields["source"], f"{prefix}.source")
+    _reject_unknown_keys(source, {"step"}, f"{prefix}.source")
+    if "step" not in source:
+        raise ConfigError(f"{prefix}.source.step is required")
+    fields["source"] = {
+        "step": _normalize_step_id(source["step"], f"{prefix}.source.step")
+    }
+
+    raw_operations = fields["operations"]
+    if not isinstance(raw_operations, list) or not raw_operations:
+        raise ConfigError(f"{prefix}.operations must be a non-empty array")
+
+    normalized: list[dict[str, Any]] = []
+    transforms: set[str] = set()
+    measured: set[str] = set()
+    export_names: set[str] = set()
+    domain = "time"
+    has_result = False
+
+    allowed_fields = {
+        "remove_dc": {"op"},
+        "detrend": {"op", "method"},
+        "window": {"op", "name"},
+        "fft": {"op"},
+        "measure": {"op", "metrics"},
+        "export": {"op", "name", "formats"},
+    }
+    required_fields = {
+        "detrend": {"method"},
+        "window": {"name"},
+        "measure": {"metrics"},
+        "export": {"name", "formats"},
+    }
+
+    for operation_index, raw_operation in enumerate(raw_operations):
+        operation_prefix = f"{prefix}.operations[{operation_index}]"
+        if not isinstance(raw_operation, dict):
+            raise ConfigError(f"{operation_prefix} operation must be a TOML table")
+        raw_op = raw_operation.get("op")
+        if not isinstance(raw_op, str) or not raw_op.strip():
+            raise ConfigError(f"{operation_prefix}.op must be a non-empty string")
+        op = raw_op.strip().lower()
+        if op not in allowed_fields:
+            raise ConfigError(f"{operation_prefix} has unsupported op {op!r}")
+
+        unknown = sorted(set(raw_operation) - allowed_fields[op])
+        if unknown:
+            names = ", ".join(repr(name) for name in unknown)
+            raise ConfigError(f"{operation_prefix} {op} has unknown field {names}")
+        missing = sorted(required_fields.get(op, set()) - set(raw_operation))
+        if missing:
+            names = ", ".join(repr(name) for name in missing)
+            raise ConfigError(f"{operation_prefix} {op} missing required field {names}")
+
+        operation: dict[str, Any] = {"op": op}
+        if op in {"remove_dc", "detrend", "window", "fft"}:
+            if op in transforms:
+                raise ConfigError(f"{prefix} operation {op!r} may appear at most once")
+            if op in {"remove_dc", "detrend"} and transforms & {"remove_dc", "detrend"}:
+                raise ConfigError(f"{prefix} remove_dc and detrend are mutually exclusive")
+            if domain == "frequency":
+                raise ConfigError(f"{prefix} operation {op!r} must appear before fft")
+            if op in {"remove_dc", "detrend"} and "window" in transforms:
+                raise ConfigError(f"{prefix} operation {op!r} must appear before window")
+            transforms.add(op)
+
+        if op == "detrend":
+            method = raw_operation["method"]
+            if not isinstance(method, str) or method.lower() != "linear":
+                raise ConfigError(f"{operation_prefix}.method must be 'linear'")
+            operation["method"] = "linear"
+        elif op == "window":
+            name = raw_operation["name"]
+            if not isinstance(name, str) or name.lower() not in {"hann", "hamming", "blackman"}:
+                raise ConfigError(
+                    f"{operation_prefix}.name must be one of hann, hamming, blackman"
+                )
+            operation["name"] = name.lower()
+        elif op == "fft":
+            domain = "frequency"
+        elif op == "measure":
+            raw_metrics = raw_operation["metrics"]
+            if not isinstance(raw_metrics, list) or not raw_metrics:
+                raise ConfigError(f"{operation_prefix}.metrics must be a non-empty array")
+            metrics: list[str] = []
+            permitted = ANALYSIS_TIME_METRICS if domain == "time" else ANALYSIS_FREQUENCY_METRICS
+            for raw_metric in raw_metrics:
+                if not isinstance(raw_metric, str) or not raw_metric:
+                    raise ConfigError(f"{operation_prefix}.metrics entries must be non-empty strings")
+                metric = raw_metric
+                if metric not in permitted:
+                    other_domain = (
+                        metric in ANALYSIS_FREQUENCY_METRICS
+                        if domain == "time"
+                        else metric in ANALYSIS_TIME_METRICS
+                    )
+                    if other_domain:
+                        raise ConfigError(
+                            f"{operation_prefix} metric {metric!r} requires "
+                            f"{'frequency' if domain == 'time' else 'time'}-domain data"
+                        )
+                    raise ConfigError(f"{operation_prefix} has unsupported metric {metric!r}")
+                if metric in measured:
+                    raise ConfigError(f"{prefix} has duplicate metric {metric!r}")
+                measured.add(metric)
+                metrics.append(metric)
+            operation["metrics"] = metrics
+            has_result = True
+        elif op == "export":
+            name = raw_operation["name"]
+            if not isinstance(name, str) or _ANALYSIS_EXPORT_NAME.fullmatch(name) is None:
+                raise ConfigError(
+                    f"{operation_prefix}.name must match ^[a-z][a-z0-9_-]{{0,63}}$"
+                )
+            if name in export_names:
+                raise ConfigError(f"{prefix} has duplicate export name {name!r}")
+            export_names.add(name)
+            raw_formats = raw_operation["formats"]
+            if not isinstance(raw_formats, list) or not raw_formats:
+                raise ConfigError(f"{operation_prefix}.formats must be a non-empty array")
+            formats: list[str] = []
+            for raw_format in raw_formats:
+                if not isinstance(raw_format, str) or raw_format.lower() not in {"npy", "csv"}:
+                    raise ConfigError(f"{operation_prefix} format must be one of npy, csv")
+                file_format = raw_format.lower()
+                if file_format in formats:
+                    raise ConfigError(f"{operation_prefix} has duplicate export format {file_format!r}")
+                formats.append(file_format)
+            operation["name"] = name
+            operation["formats"] = formats
+            has_result = True
+        normalized.append(operation)
+
+    if not has_result:
+        raise ConfigError(f"{prefix}.operations requires at least one measure or export operation")
+    fields["operations"] = normalized
+
+    if "expect" in fields:
+        expect = _parse_expect(fields["expect"], f"{prefix}.expect")
+        unavailable = sorted(set(expect) - measured)
+        if unavailable:
+            raise ConfigError(
+                f"{prefix}.expect metric {unavailable[0]!r} must be selected by a measure operation"
+            )
+        fields["expect"] = expect
 
 
 def _normalize_frequency_response_fields(prefix: str, fields: dict[str, Any]) -> None:
