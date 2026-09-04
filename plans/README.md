@@ -20,6 +20,7 @@ wavebench run check --plan plans/example_scope_expect_quality.toml
 这些文件适合阅读和改成自己的 plan，但仍需要真实设备才能执行：
 
 - `example_scope_expect_quality.toml`
+- `example_signal_processing_pipeline.toml`
 - `example_source_scope_dmm_report.toml`
 - `example_dmm_acv_source_smoke.toml`
 - `demo_dg4202_10k_screenshot_report.toml`

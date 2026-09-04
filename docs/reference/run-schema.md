@@ -25,3 +25,56 @@ python -m wavebench run template <name> --print
 当前 schema 的 canonical source 是 `src/wavebench/services/run_plan.py` 中的 step schema 以及 `python -m wavebench run schema` 的输出。模板名称与默认内容来自 template registry。页面中的计划片段只能说明一个任务，不能作为完整字段表或型号 capability 的来源。
 
 实际执行步骤、连接预检和副作用见[执行一次实验](../how-to/run-an-experiment.md)。字段错误和 schema 变更的排查见[run plan 排错](../how-to/troubleshooting.md)。
+
+## 稳定 step ID 与离线分析
+
+每个 `[[steps]]` 都可以声明结构字段 `id`。ID 必须匹配 `^[a-z][a-z0-9_-]{0,63}$`，并在同一个 plan 内唯一；没有 ID 的既有 plan 无需迁移。`id` 不属于 step 的执行参数，因此不会出现在 `RunStep.fields` 中。
+
+`analysis.pipeline` 使用稳定 ID 引用同一 plan 内更早的 `scope.capture`：
+
+```toml
+[[steps]]
+id = "capture_main"
+kind = "scope.capture"
+channel = 1
+save_npy = true
+on_failure = "continue"
+
+[[steps]]
+id = "spectrum_main"
+kind = "analysis.pipeline"
+source = { step = "capture_main" }
+operations = [
+  { op = "measure", metrics = ["voltage_mean_v", "voltage_rms_v", "voltage_vpp_v"] },
+  { op = "remove_dc" },
+  { op = "window", name = "hann" },
+  { op = "fft" },
+  { op = "measure", metrics = ["peak_frequency_hz", "peak_amplitude_v", "noise_floor_v", "thd_ratio"] },
+  { op = "export", name = "spectrum", formats = ["npy", "csv"] },
+]
+
+[steps.expect]
+peak_frequency_hz = { min = 990, max = 1010 }
+thd_ratio = { max = 0.05 }
+```
+
+来源 capture 必须显式设置 `save_npy = true`。首版不接受历史 capture package 路径，也不接受其他 step 类型或后续 step 作为来源。所有 `analysis.pipeline` 必须形成 plan 的连续末尾部分；硬件步骤、恢复、会话关闭和租约释放完成后，才会执行离线分析。分析 step 支持 `on_failure`，不支持 step 局部 `safety_gate`，也不会触发硬件安全门。
+
+## 首版算子合同
+
+`operations` 是有序的 TOML 内联表数组。首版允许以下算子：
+
+| 算子 | 参数 | 输入／输出域 |
+| --- | --- | --- |
+| `remove_dc` | 无 | 时域 → 时域 |
+| `detrend` | `method = "linear"` | 时域 → 时域 |
+| `window` | `name = "hann|hamming|blackman"` | 时域 → 时域 |
+| `fft` | 无 | 时域 → 频域 |
+| `measure` | 非空 `metrics` 数组 | 观察当前域，不改变数据 |
+| `export` | 安全的 `name`；`formats` 为 `npy`、`csv` 的非空子集 | 导出当前域，不改变数据 |
+
+变换算子各至多出现一次；`remove_dc` 与 `detrend` 互斥。去直流或去趋势必须位于窗口之前，所有时域变换必须位于 FFT 之前。测量指标和导出名称在同一流水线内不得重复，流水线至少包含一个 `measure` 或 `export`。
+
+时域指标为 `voltage_min_v`、`voltage_max_v`、`voltage_mean_v`、`voltage_rms_v` 和 `voltage_vpp_v`。频域指标为 `peak_frequency_hz`、`peak_amplitude_v`、`noise_floor_v`、`thd_ratio`，以及 `harmonic_2`～`harmonic_5` 的 `frequency_hz` 和 `amplitude_v` 字段。`[steps.expect]` 只能引用流水线中已显式选择的测量指标。
+
+完整示例见 `plans/example_signal_processing_pipeline.toml`。数值定义和派生产物结构见[运行产物 Reference](artifacts.md)。旧 `scope.capture` 的 `expect_fft` 保持原有算法，不由新流水线重定义。

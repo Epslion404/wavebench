@@ -13,6 +13,11 @@
   summary.csv          面向快速查看和表格导入的摘要
   steps/
     00_<kind>.json     单个 step 记录
+  processing/          仅在存在 analysis.pipeline 时生成
+    01_<step-id>/
+      manifest.json
+      metrics.json
+      exports/
 ```
 
 `run report <run-dir>` 只读取已有产物并生成离线报告，不连接仪器，也不修改原始采集数据；它会在运行目录或显式输出位置写入派生的 HTML，使用 `--pdf` 时还会写入 PDF。
@@ -32,7 +37,42 @@
 
 ## step 记录
 
-每个 `steps/<index>_<kind>.json` 记录包含 `index`、`kind`、`status`、`fields` 和 `artifact`。具体 `artifact` 形状取决于 step；采集、频响、DMM、Source V2 和 RF Source 不共享一张人工字段表。
+每个 `steps/<index>_<kind>.json` 记录包含 `index`、`kind`、`status`、`fields` 和 `artifact`。step 声明 ID 时还会包含 `id`；没有 ID 的旧记录不增加该字段，文件名仍保持原格式。具体 `artifact` 形状取决于 step；采集、频响、DMM、Source V2、RF Source 和离线分析不共享一张人工字段表。
+
+## 信号处理派生产物
+
+每个 `analysis.pipeline` step 使用独立目录：
+
+```text
+<run-dir>/processing/<index>_<step-id-or-analysis_pipeline>/
+  manifest.json
+  metrics.json
+  exports/
+    <name>.npy
+    <name>.csv
+```
+
+`manifest.json` 的 schema 为 `wavebench.analysis_pipeline.v1`。它记录来源 step 及状态、来源 capture package／metadata／NPY 的 run-relative POSIX 路径、原始 NPY 的 SHA-256、规范化算子、逐阶段状态、采样信息、窗与相干增益、警告、导出、数值定义和结构化错误。某个后续算子失败时，已经完成的导出会保留，并由 `partial` 和 `failed_stage` 标明部分结果。
+
+`metrics.json` 的 schema 为 `wavebench.analysis_metrics.v1`，结构如下：
+
+```json
+{
+  "schema": "wavebench.analysis_metrics.v1",
+  "metrics": {
+    "peak_frequency_hz": 1000.0,
+    "thd_ratio": null
+  }
+}
+```
+
+指标值只写有限 JSON 数字或 `null`，不写 `NaN`、`Infinity`。step artifact 的 `metrics` 保留同一份小型映射；`expect` 继续使用既有 `{ min, max }` 结果结构，因此 `summary.csv` 的 expectation 列和 HTML 验收表不需要另一套解释。
+
+时域 NPY 和 CSV 固定为 `time_s,voltage_v` 两列。频域 NPY 和 CSV 固定为 `frequency_hz,real_v,imaginary_v,amplitude_v` 四列。每个导出记录文件路径、列名和 SHA-256；路径相对于 run 目录并使用 POSIX 分隔符。来源 NPY 保持原样，处理器只读取 capture package 内经过边界校验的文件。
+
+频域 `amplitude_v` 是单边峰值幅度，不是 RMS。`noise_floor_v` 是排除 DC 与主峰后的非 DC 幅度 bin 中位数，表示每 bin 峰值幅度，不表示积分噪声。THD 使用 Nyquist 范围内的 H2～H5。
+
+HTML 报告在存在分析 step 时增加「信号处理 / Signal processing」区域，并在报告 manifest 中条件性增加 `analysis_pipelines`。没有分析 step 的旧报告 manifest 不增加该字段。
 
 ## `summary.csv`
 
