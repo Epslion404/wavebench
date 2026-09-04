@@ -121,7 +121,10 @@ from wavebench.services.run_analysis import (
     step_status,
 )
 from wavebench.services.run_plan import RunPlan, RunStep
-from wavebench.services.run_pipeline import execute_analysis_pipeline
+from wavebench.services.run_pipeline import (
+    ensure_analysis_pipeline_dependencies,
+    execute_analysis_pipeline,
+)
 from wavebench.services.run_restore import restore_source_state, snapshot_source_state
 from wavebench.services.run_safety import (
     check_run_plan_safety_limits,
@@ -308,6 +311,7 @@ class RunService:
     def check(self, plan: RunPlan) -> None:
         check_run_plan_safety_limits(plan, self.config.safety_limits)
         reject_unsupported_steps(plan)
+        ensure_analysis_pipeline_dependencies(plan)
         self._check_frequency_response_baselines(plan)
         self._check_frequency_response_resumes(plan)
         self._check_rf_source_access(plan)

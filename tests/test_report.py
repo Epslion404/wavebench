@@ -56,6 +56,14 @@ class RunReportTests(unittest.TestCase):
                                     "source_step": "capture_main",
                                     "operations": [
                                         {"op": "remove_dc"},
+                                        {
+                                            "op": "filter",
+                                            "family": "fir",
+                                            "response": "bandstop",
+                                            "cutoff_hz": [49.0, 51.0],
+                                            "numtaps": 101,
+                                            "mode": "zero_phase",
+                                        },
                                         {"op": "fft"},
                                         {"op": "measure", "metrics": ["peak_frequency_hz"]},
                                     ],
@@ -85,7 +93,11 @@ class RunReportTests(unittest.TestCase):
             self.assertIn("<h2>信号处理 / Signal processing</h2>", html)
             self.assertIn("spectrum_main", html)
             self.assertIn("capture_main", html)
-            self.assertIn("remove_dc → fft → measure", html)
+            self.assertIn(
+                "remove_dc → filter(fir, bandstop, 49–51 Hz, 101 taps, zero_phase) "
+                "→ fft → measure",
+                html,
+            )
             self.assertIn("peak_frequency_hz=1000", html)
             self.assertIn("thd_ratio=null", html)
             self.assertIn("harmonic_5_out_of_band", html)

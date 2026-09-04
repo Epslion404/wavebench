@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 import numpy as np
 
@@ -26,6 +26,8 @@ ANALYSIS_FREQUENCY_METRICS = frozenset({
         for field in ("frequency_hz", "amplitude_v")
     ),
 })
+ANALYSIS_FIR_RESPONSES = frozenset({"lowpass", "highpass", "bandpass", "bandstop"})
+ANALYSIS_FIR_MODES = frozenset({"causal", "zero_phase"})
 SIGNIFICANT_PEAK_V = 1e-12
 
 
@@ -72,6 +74,18 @@ class FrequencySignal:
                 self.amplitude_v,
             )
         )
+
+
+@dataclass(frozen=True)
+class FirFilterResult:
+    signal: TimeSignal
+    taps: np.ndarray
+    sample_interval_s: float
+    scipy_version: str
+
+    @property
+    def sample_rate_hz(self) -> float:
+        return 1.0 / self.sample_interval_s
 
 
 def validate_waveform(data: Any) -> TimeSignal:
@@ -133,14 +147,87 @@ def window_signal(signal: TimeSignal, name: str) -> TimeSignal:
     )
 
 
+def filter_fir(
+    signal: TimeSignal,
+    *,
+    response: str,
+    cutoff_hz: float | Sequence[float],
+    numtaps: int,
+    mode: str,
+) -> FirFilterResult:
+    if response not in ANALYSIS_FIR_RESPONSES:
+        raise DataError("analysis FIR response must be lowpass, highpass, bandpass, or bandstop")
+    if mode not in ANALYSIS_FIR_MODES:
+        raise DataError("analysis FIR mode must be causal or zero_phase")
+    if isinstance(numtaps, bool) or not isinstance(numtaps, int) or numtaps < 3 or numtaps % 2 == 0:
+        raise DataError("analysis FIR numtaps must be an odd integer >= 3")
+
+    cutoff = _fir_cutoff(response, cutoff_hz)
+    sample_interval = _uniform_sample_interval(signal, "analysis FIR filter")
+    sample_rate = 1.0 / sample_interval
+    nyquist = sample_rate / 2.0
+    cutoff_values = [cutoff] if isinstance(cutoff, float) else cutoff
+    if any(value >= nyquist for value in cutoff_values):
+        raise DataError(
+            f"analysis FIR cutoff_hz must be below Nyquist frequency {nyquist:.17g} Hz"
+        )
+
+    if mode == "zero_phase":
+        minimum_samples = 3 * numtaps + 1
+        if signal.voltage_v.size < minimum_samples:
+            raise DataError(
+                "analysis zero-phase FIR requires at least "
+                f"{minimum_samples} samples for numtaps={numtaps}"
+            )
+
+    try:
+        from scipy import __version__ as scipy_version
+        from scipy.signal import filtfilt, firwin, lfilter
+    except ImportError as exc:  # pragma: no cover - RunService checks this before execution
+        raise DataError(
+            "analysis FIR filter requires SciPy; install WaveBench with `.[analysis]`"
+        ) from exc
+
+    try:
+        taps = np.asarray(
+            firwin(
+                numtaps,
+                cutoff,
+                window="hamming",
+                pass_zero=response,
+                scale=True,
+                fs=sample_rate,
+            ),
+            dtype=np.float64,
+        )
+        if mode == "causal":
+            voltage = lfilter(taps, [1.0], signal.voltage_v, axis=-1)
+        else:
+            voltage = filtfilt(
+                taps,
+                [1.0],
+                signal.voltage_v,
+                axis=-1,
+                padtype="odd",
+                padlen=3 * numtaps,
+                method="pad",
+            )
+    except ValueError as exc:
+        raise DataError(f"analysis FIR filter failed: {exc}") from exc
+
+    return FirFilterResult(
+        signal=_replace_voltage(signal, np.asarray(voltage, dtype=np.float64)),
+        taps=taps,
+        sample_interval_s=sample_interval,
+        scipy_version=scipy_version,
+    )
+
+
 def fft_signal(signal: TimeSignal) -> FrequencySignal:
     samples = int(signal.voltage_v.size)
     if samples < 4:
         raise DataError("analysis FFT requires at least four samples")
-    intervals = np.diff(signal.time_s)
-    sample_interval = float(np.median(intervals))
-    if not np.allclose(intervals, sample_interval, rtol=1e-6, atol=0.0):
-        raise DataError("analysis FFT requires uniformly sampled data")
+    sample_interval = _uniform_sample_interval(signal, "analysis FFT")
     if not np.isfinite(signal.coherent_gain) or signal.coherent_gain <= 0:
         raise DataError("analysis FFT requires a positive coherent gain")
 
@@ -258,6 +345,49 @@ def _replace_voltage(signal: TimeSignal, voltage: np.ndarray) -> TimeSignal:
         coherent_gain=signal.coherent_gain,
         window_name=signal.window_name,
     )
+
+
+def _fir_cutoff(
+    response: str, cutoff_hz: float | Sequence[float]
+) -> float | list[float]:
+    if response in {"lowpass", "highpass"}:
+        if isinstance(cutoff_hz, Sequence) and not isinstance(cutoff_hz, (str, bytes)):
+            raise DataError(f"analysis FIR {response} cutoff_hz must be a positive number")
+        return _positive_finite(cutoff_hz, "analysis FIR cutoff_hz")
+
+    if (
+        not isinstance(cutoff_hz, Sequence)
+        or isinstance(cutoff_hz, (str, bytes))
+        or len(cutoff_hz) != 2
+    ):
+        raise DataError(f"analysis FIR {response} cutoff_hz must contain two frequencies")
+    values = [_positive_finite(value, "analysis FIR cutoff_hz") for value in cutoff_hz]
+    if values[1] <= values[0]:
+        raise DataError("analysis FIR cutoff_hz must be strictly increasing")
+    return values
+
+
+def _positive_finite(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
+        raise DataError(f"{name} must be a positive finite number")
+    result = float(value)
+    if not np.isfinite(result) or result <= 0:
+        raise DataError(f"{name} must be a positive finite number")
+    return result
+
+
+def _uniform_sample_interval(signal: TimeSignal, operation: str) -> float:
+    if signal.time_s.size < 2:
+        raise DataError(f"{operation} requires at least two samples")
+    intervals = np.diff(signal.time_s)
+    sample_interval = float(np.median(intervals))
+    if (
+        not np.isfinite(sample_interval)
+        or sample_interval <= 0
+        or not np.allclose(intervals, sample_interval, rtol=1e-6, atol=0.0)
+    ):
+        raise DataError(f"{operation} requires uniformly sampled data")
+    return sample_interval
 
 
 def _selected_metrics(

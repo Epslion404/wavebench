@@ -1,4 +1,5 @@
 from hashlib import sha256
+import importlib.util
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,9 +8,16 @@ from unittest.mock import patch
 
 import numpy as np
 
+from wavebench.errors import ConfigError
 from wavebench.services.run_artifacts import RunStepRecord
-from wavebench.services.run_pipeline import execute_analysis_pipeline
-from wavebench.services.run_plan import RunStep
+from wavebench.services.run_pipeline import (
+    ensure_analysis_pipeline_dependencies,
+    execute_analysis_pipeline,
+)
+from wavebench.services.run_plan import RunStep, load_run_plan
+
+
+HAS_SCIPY = importlib.util.find_spec("scipy") is not None
 
 
 class AnalysisPipelineArtifactTests(unittest.TestCase):
@@ -117,6 +125,7 @@ class AnalysisPipelineArtifactTests(unittest.TestCase):
             self.assertEqual(manifest["schema"], "wavebench.analysis_pipeline.v1")
             self.assertEqual(manifest["status"], "ok")
             self.assertFalse(manifest["partial"])
+            self.assertNotIn("filters", manifest)
             self.assertEqual(manifest["source"]["step"], "capture_main")
             self.assertEqual(manifest["source"]["npy_sha256"], source_before)
             self.assertEqual(manifest["window"]["name"], "hann")
@@ -135,6 +144,162 @@ class AnalysisPipelineArtifactTests(unittest.TestCase):
             for export in manifest["exports"]:
                 export_path = run_dir / export["path"]
                 self.assertEqual(export["sha256"], sha256(export_path.read_bytes()).hexdigest())
+
+    @unittest.skipUnless(HAS_SCIPY, "SciPy analysis dependency is unavailable")
+    def test_serial_fir_filters_write_metadata_and_time_export(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "runs" / "run"
+            run_dir.mkdir(parents=True)
+            source_step, source_record, source_npy = self.source(root, self.waveform())
+            source_before = sha256(source_npy.read_bytes()).hexdigest()
+            step = self.pipeline([
+                {
+                    "op": "filter",
+                    "family": "fir",
+                    "response": "bandstop",
+                    "cutoff_hz": [49.0, 51.0],
+                    "numtaps": 31,
+                    "mode": "zero_phase",
+                },
+                {
+                    "op": "filter",
+                    "family": "fir",
+                    "response": "lowpass",
+                    "cutoff_hz": 1000.0,
+                    "numtaps": 33,
+                    "mode": "causal",
+                },
+                {"op": "export", "name": "filtered", "formats": ["npy", "csv"]},
+            ])
+
+            artifact = execute_analysis_pipeline(
+                run_dir=run_dir,
+                step=step,
+                source_step=source_step,
+                source_record=source_record,
+            )
+
+            processing = run_dir / "processing" / "01_spectrum_main"
+            manifest = json.loads((processing / "manifest.json").read_text(encoding="utf-8"))
+            filters = manifest["filters"]
+            self.assertEqual(artifact["analysis_pipeline"]["status"], "ok")
+            self.assertEqual([item["operation_index"] for item in filters], [0, 1])
+            self.assertEqual([item["response"] for item in filters], ["bandstop", "lowpass"])
+            self.assertEqual(filters[0]["execution_function"], "scipy.signal.filtfilt")
+            self.assertEqual(filters[0]["effective_magnitude_response"], "single_pass_squared")
+            self.assertEqual(filters[0]["boundary"], "odd_extension")
+            self.assertEqual(filters[0]["padlen"], 93)
+            self.assertEqual(filters[1]["execution_function"], "scipy.signal.lfilter")
+            self.assertEqual(filters[1]["initial_state"], "zeros")
+            self.assertEqual(filters[1]["nominal_single_pass_group_delay_samples"], 16.0)
+            self.assertAlmostEqual(filters[0]["sample_rate_hz"], 10_000.0)
+            self.assertEqual(len(filters[0]["coefficients_sha256"]), 64)
+            self.assertEqual(manifest["stages"][1]["filter"], filters[0])
+            self.assertEqual(manifest["stages"][2]["filter"], filters[1])
+            self.assertEqual(np.load(processing / "exports" / "filtered.npy").shape, (1000, 2))
+            self.assertEqual(
+                (processing / "exports" / "filtered.csv")
+                .read_text(encoding="utf-8")
+                .splitlines()[0],
+                "time_s,voltage_v",
+            )
+            self.assertEqual(sha256(source_npy.read_bytes()).hexdigest(), source_before)
+
+    @unittest.skipUnless(HAS_SCIPY, "SciPy analysis dependency is unavailable")
+    def test_completed_filter_metadata_survives_later_nyquist_failure(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "runs" / "run"
+            run_dir.mkdir(parents=True)
+            source_step, source_record, _ = self.source(root, self.waveform())
+            step = self.pipeline([
+                {
+                    "op": "filter",
+                    "family": "fir",
+                    "response": "lowpass",
+                    "cutoff_hz": 1000.0,
+                    "numtaps": 31,
+                    "mode": "causal",
+                },
+                {
+                    "op": "filter",
+                    "family": "fir",
+                    "response": "lowpass",
+                    "cutoff_hz": 5000.0,
+                    "numtaps": 31,
+                    "mode": "causal",
+                },
+                {"op": "export", "name": "filtered", "formats": ["npy"]},
+            ])
+
+            artifact = execute_analysis_pipeline(
+                run_dir=run_dir,
+                step=step,
+                source_step=source_step,
+                source_record=source_record,
+            )
+
+            manifest = json.loads(
+                (run_dir / artifact["analysis_pipeline"]["manifest"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(artifact["analysis_pipeline"]["status"], "failed")
+            self.assertEqual(artifact["analysis_pipeline"]["failed_stage"], "operations[1]")
+            self.assertTrue(manifest["partial"])
+            self.assertEqual(len(manifest["filters"]), 1)
+            self.assertEqual(manifest["stages"][2]["status"], "failed")
+            self.assertEqual(manifest["stages"][3]["status"], "skipped")
+            self.assertIn("below Nyquist", manifest["error"]["message"])
+
+    def test_fir_dependency_check_is_conditional_and_actionable(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            no_filter_path = root / "no_filter.toml"
+            no_filter_path.write_text(
+                """
+[[steps]]
+id = "capture_main"
+kind = "scope.capture"
+save_npy = true
+
+[[steps]]
+kind = "analysis.pipeline"
+source = { step = "capture_main" }
+operations = [{ op = "measure", metrics = ["voltage_mean_v"] }]
+""",
+                encoding="utf-8",
+            )
+            fir_path = root / "fir.toml"
+            fir_path.write_text(
+                """
+[[steps]]
+id = "capture_main"
+kind = "scope.capture"
+save_npy = true
+
+[[steps]]
+kind = "analysis.pipeline"
+source = { step = "capture_main" }
+operations = [
+  { op = "filter", family = "fir", response = "lowpass", cutoff_hz = 1000, numtaps = 31, mode = "causal" },
+  { op = "export", name = "filtered", formats = ["npy"] },
+]
+""",
+                encoding="utf-8",
+            )
+
+            with patch("wavebench.services.run_pipeline.import_module") as load_dependency:
+                ensure_analysis_pipeline_dependencies(load_run_plan(no_filter_path))
+                load_dependency.assert_not_called()
+
+            with patch(
+                "wavebench.services.run_pipeline.import_module",
+                side_effect=ImportError("scipy unavailable"),
+            ):
+                with self.assertRaisesRegex(ConfigError, r"\.\[analysis\]"):
+                    ensure_analysis_pipeline_dependencies(load_run_plan(fir_path))
 
     def test_source_expectation_failure_still_allows_complete_npy(self) -> None:
         with TemporaryDirectory() as tmp:

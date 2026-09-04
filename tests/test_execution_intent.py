@@ -91,6 +91,41 @@ operations = [
         assert analysis["parameters"]["operations"][1] == {"op": "fft"}
 
 
+def test_analysis_pipeline_intent_carries_normalized_fir_design() -> None:
+    with TemporaryDirectory() as tmp:
+        plan = load_run_plan(
+            write_plan(
+                tmp,
+                """
+[[steps]]
+id = "capture_main"
+kind = "scope.capture"
+save_npy = true
+
+[[steps]]
+kind = "analysis.pipeline"
+source = { step = "capture_main" }
+operations = [
+  { op = "filter", family = "FIR", response = "BANDSTOP", cutoff_hz = [49, 51], numtaps = 101, mode = "ZERO_PHASE" },
+  { op = "export", name = "filtered", formats = ["npy"] },
+]
+""",
+            )
+        )
+
+        intent = build_execution_intent(plan, make_config(tmp))
+
+        fir = intent.operations[1]["parameters"]["operations"][0]
+        assert fir == {
+            "op": "filter",
+            "family": "fir",
+            "response": "bandstop",
+            "cutoff_hz": [49.0, 51.0],
+            "numtaps": 101,
+            "mode": "zero_phase",
+        }
+
+
 def test_step_id_changes_plan_and_intent_digest_without_changing_legacy_shape() -> None:
     with TemporaryDirectory() as tmp:
         legacy = _sleep_plan(tmp)

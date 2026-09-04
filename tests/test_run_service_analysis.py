@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 import json
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
@@ -296,3 +297,43 @@ duration_s = 0.001
         run = json.loads(result.run_json_path.read_text(encoding="utf-8"))
         assert len(run["steps"]) == 1
         assert "id" not in run["steps"][0]
+
+
+def test_missing_fir_dependency_is_rejected_before_instrument_lifecycle() -> None:
+    with TemporaryDirectory() as tmp:
+        plan = load_run_plan(
+            write_plan(
+                tmp,
+                """
+[[steps]]
+id = "capture_main"
+kind = "scope.capture"
+save_npy = true
+
+[[steps]]
+kind = "analysis.pipeline"
+source = { step = "capture_main" }
+operations = [
+  { op = "filter", family = "fir", response = "lowpass", cutoff_hz = 1000, numtaps = 31, mode = "causal" },
+  { op = "export", name = "filtered", formats = ["npy"] },
+]
+""",
+            )
+        )
+        service = RunService(config=make_config(tmp), logger=CommandLogger())
+
+        with patch(
+            "wavebench.services.run_service.ensure_analysis_pipeline_dependencies",
+            side_effect=ConfigError(
+                "analysis FIR filter requires SciPy; install WaveBench with `.[analysis]`"
+            ),
+        ), patch.object(service, "_run_instrument_services") as open_services:
+            try:
+                service.run(plan)
+            except ConfigError as exc:
+                assert ".[analysis]" in str(exc)
+            else:  # pragma: no cover - assertion helper without pytest dependency
+                raise AssertionError("missing FIR dependency should be rejected")
+
+        open_services.assert_not_called()
+        assert not (Path(tmp) / "data" / "runs").exists()

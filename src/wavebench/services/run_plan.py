@@ -10,6 +10,8 @@ import tomllib
 
 from wavebench.config import normalize_waveform_points
 from wavebench.data.signal_pipeline import (
+    ANALYSIS_FIR_MODES,
+    ANALYSIS_FIR_RESPONSES,
     ANALYSIS_FREQUENCY_METRICS,
     ANALYSIS_TIME_METRICS,
 )
@@ -330,7 +332,7 @@ for _step_kind, _step_fields in _OPTIONAL_FIELDS.items():
 
 
 _STEP_NOTES = {
-    "analysis.pipeline": "Process one earlier scope.capture NPY after all hardware sessions close. Uses a validated linear NumPy operator list and never opens an instrument.",
+    "analysis.pipeline": "Process one earlier scope.capture NPY after all hardware sessions close. Uses a validated linear operator list, checks optional dependencies on demand, and never opens an instrument.",
     "scope.auto": "Explicit RTM2032 AUToscale. It changes front-panel settings and is never inserted implicitly.",
     "scope.capture": "Trigger one acquisition, write a capture package, and optionally evaluate quality/expect checks. Use target_vpp or vertical_scale_v_per_div to fit the waveform vertically before capture.",
     "sweep.frequency_response": "Sweep a source through discrete frequencies, capture reference and response channels in one acquisition per point, and write a Bode response CSV.",
@@ -1274,6 +1276,7 @@ def _normalize_analysis_pipeline_fields(prefix: str, fields: dict[str, Any]) -> 
     allowed_fields = {
         "remove_dc": {"op"},
         "detrend": {"op", "method"},
+        "filter": {"op", "family", "response", "cutoff_hz", "numtaps", "mode"},
         "window": {"op", "name"},
         "fft": {"op"},
         "measure": {"op", "metrics"},
@@ -1281,6 +1284,7 @@ def _normalize_analysis_pipeline_fields(prefix: str, fields: dict[str, Any]) -> 
     }
     required_fields = {
         "detrend": {"method"},
+        "filter": {"family", "response", "cutoff_hz", "numtaps", "mode"},
         "window": {"name"},
         "measure": {"metrics"},
         "export": {"name", "formats"},
@@ -1318,7 +1322,68 @@ def _normalize_analysis_pipeline_fields(prefix: str, fields: dict[str, Any]) -> 
                 raise ConfigError(f"{prefix} operation {op!r} must appear before window")
             transforms.add(op)
 
-        if op == "detrend":
+        if op == "filter":
+            if domain == "frequency":
+                raise ConfigError(f"{prefix} operation 'filter' must appear before fft")
+            if "window" in transforms:
+                raise ConfigError(f"{prefix} operation 'filter' must appear before window")
+
+        if op == "filter":
+            family = raw_operation["family"]
+            if not isinstance(family, str) or family.strip().lower() != "fir":
+                raise ConfigError(f"{operation_prefix}.family must be 'fir'")
+            response = raw_operation["response"]
+            if (
+                not isinstance(response, str)
+                or response.strip().lower() not in ANALYSIS_FIR_RESPONSES
+            ):
+                raise ConfigError(
+                    f"{operation_prefix}.response must be one of "
+                    "lowpass, highpass, bandpass, bandstop"
+                )
+            response = response.strip().lower()
+            raw_cutoff = raw_operation["cutoff_hz"]
+            if response in {"lowpass", "highpass"}:
+                cutoff: float | list[float] = _analysis_positive_float(
+                    raw_cutoff, f"{operation_prefix}.cutoff_hz"
+                )
+            else:
+                if not isinstance(raw_cutoff, list) or len(raw_cutoff) != 2:
+                    raise ConfigError(
+                        f"{operation_prefix}.cutoff_hz must be a two-element array "
+                        f"for {response}"
+                    )
+                cutoff = [
+                    _analysis_positive_float(value, f"{operation_prefix}.cutoff_hz")
+                    for value in raw_cutoff
+                ]
+                if cutoff[1] <= cutoff[0]:
+                    raise ConfigError(
+                        f"{operation_prefix}.cutoff_hz must be strictly increasing"
+                    )
+            numtaps = raw_operation["numtaps"]
+            if (
+                isinstance(numtaps, bool)
+                or not isinstance(numtaps, int)
+                or numtaps < 3
+                or numtaps % 2 == 0
+            ):
+                raise ConfigError(
+                    f"{operation_prefix}.numtaps must be an odd integer >= 3"
+                )
+            mode = raw_operation["mode"]
+            if not isinstance(mode, str) or mode.strip().lower() not in ANALYSIS_FIR_MODES:
+                raise ConfigError(
+                    f"{operation_prefix}.mode must be 'causal' or 'zero_phase'"
+                )
+            operation.update({
+                "family": "fir",
+                "response": response,
+                "cutoff_hz": cutoff,
+                "numtaps": numtaps,
+                "mode": mode.strip().lower(),
+            })
+        elif op == "detrend":
             method = raw_operation["method"]
             if not isinstance(method, str) or method.lower() != "linear":
                 raise ConfigError(f"{operation_prefix}.method must be 'linear'")
@@ -1397,6 +1462,12 @@ def _normalize_analysis_pipeline_fields(prefix: str, fields: dict[str, Any]) -> 
                 f"{prefix}.expect metric {unavailable[0]!r} must be selected by a measure operation"
             )
         fields["expect"] = expect
+
+
+def _analysis_positive_float(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"{name} must be a positive number")
+    return _positive_float(value, name)
 
 
 def _normalize_frequency_response_fields(prefix: str, fields: dict[str, Any]) -> None:

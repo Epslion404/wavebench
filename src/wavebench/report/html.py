@@ -1985,7 +1985,7 @@ def _signal_processing_block(run: RunPackage, output_dir: Path) -> str:
         operations = pipeline.get("operations", [])
         operation_names = (
             [
-                str(operation.get("op"))
+                _analysis_operation_label(operation)
                 for operation in operations
                 if isinstance(operation, dict) and operation.get("op")
             ]
@@ -2043,6 +2043,24 @@ def _signal_processing_block(run: RunPackage, output_dir: Path) -> str:
 </tbody>
 </table></div>
 """
+
+
+def _analysis_operation_label(operation: dict[str, Any]) -> str:
+    op = str(operation.get("op", ""))
+    if op != "filter":
+        return op
+    cutoff = operation.get("cutoff_hz")
+    if isinstance(cutoff, list):
+        cutoff_text = "–".join(_format_plain(value) for value in cutoff)
+    else:
+        cutoff_text = _format_plain(cutoff)
+    return (
+        "filter("
+        f"{operation.get('family', '')}, {operation.get('response', '')}, "
+        f"{cutoff_text} Hz, {operation.get('numtaps', '')} taps, "
+        f"{operation.get('mode', '')}"
+        ")"
+    )
 
 
 def _analysis_file_link(

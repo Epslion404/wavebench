@@ -1,4 +1,6 @@
+import importlib.util
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -7,6 +9,7 @@ from wavebench.data.signal_pipeline import (
     FrequencySignal,
     detrend_linear,
     fft_signal,
+    filter_fir,
     measure_frequency,
     measure_time,
     remove_dc,
@@ -14,6 +17,9 @@ from wavebench.data.signal_pipeline import (
     window_signal,
 )
 from wavebench.errors import DataError
+
+
+HAS_SCIPY = importlib.util.find_spec("scipy") is not None
 
 
 class SignalPipelineTests(unittest.TestCase):
@@ -79,6 +85,172 @@ class SignalPipelineTests(unittest.TestCase):
                 np.testing.assert_array_equal(result.voltage_v, expected)
                 self.assertEqual(result.coherent_gain, float(np.mean(expected)))
                 self.assertEqual(result.window_name, name)
+
+    @unittest.skipUnless(HAS_SCIPY, "SciPy analysis dependency is unavailable")
+    def test_causal_fir_matches_firwin_and_preserves_time_axis(self) -> None:
+        from scipy.signal import firwin
+
+        samples = 64
+        sample_rate_hz = 1000.0
+        time_s = np.arange(samples, dtype=float) / sample_rate_hz
+        voltage_v = np.zeros(samples)
+        voltage_v[0] = 1.0
+        signal = validate_waveform(np.column_stack((time_s, voltage_v)))
+
+        result = filter_fir(
+            signal,
+            response="lowpass",
+            cutoff_hz=100.0,
+            numtaps=11,
+            mode="causal",
+        )
+        expected_taps = firwin(
+            11,
+            100.0,
+            window="hamming",
+            pass_zero="lowpass",
+            scale=True,
+            fs=result.sample_rate_hz,
+        )
+
+        np.testing.assert_array_equal(result.signal.time_s, time_s)
+        np.testing.assert_allclose(result.taps, expected_taps, rtol=0, atol=0)
+        np.testing.assert_allclose(result.signal.voltage_v[:11], expected_taps, atol=1e-15)
+        np.testing.assert_allclose(result.signal.voltage_v[11:], 0.0, atol=1e-15)
+        self.assertAlmostEqual(result.sample_rate_hz, sample_rate_hz)
+        self.assertTrue(result.scipy_version)
+
+    @unittest.skipUnless(HAS_SCIPY, "SciPy analysis dependency is unavailable")
+    def test_zero_phase_fir_fixes_padding_and_minimum_samples(self) -> None:
+        from scipy.signal import filtfilt
+
+        numtaps = 11
+        sample_rate_hz = 1000.0
+        too_short = self.waveform(3 * numtaps, sample_rate_hz)
+        with self.assertRaisesRegex(DataError, "at least 34 samples"):
+            filter_fir(
+                validate_waveform(too_short),
+                response="lowpass",
+                cutoff_hz=100.0,
+                numtaps=numtaps,
+                mode="zero_phase",
+            )
+
+        minimum = validate_waveform(self.waveform(3 * numtaps + 1, sample_rate_hz))
+        with patch("scipy.signal.filtfilt", wraps=filtfilt) as apply_filter:
+            result = filter_fir(
+                minimum,
+                response="lowpass",
+                cutoff_hz=100.0,
+                numtaps=numtaps,
+                mode="zero_phase",
+            )
+
+        self.assertEqual(result.signal.voltage_v.size, 3 * numtaps + 1)
+        self.assertTrue(np.all(np.isfinite(result.signal.voltage_v)))
+        self.assertEqual(
+            apply_filter.call_args.kwargs,
+            {
+                "axis": -1,
+                "padtype": "odd",
+                "padlen": 3 * numtaps,
+                "method": "pad",
+            },
+        )
+
+    @unittest.skipUnless(HAS_SCIPY, "SciPy analysis dependency is unavailable")
+    def test_zero_phase_fir_squares_the_single_pass_magnitude_response(self) -> None:
+        sample_rate_hz = 10_000.0
+        samples = 10_000
+        frequency_hz = 1000.0
+        time_s = np.arange(samples, dtype=float) / sample_rate_hz
+        voltage_v = np.sin(2 * np.pi * frequency_hz * time_s)
+        signal = validate_waveform(np.column_stack((time_s, voltage_v)))
+
+        causal = filter_fir(
+            signal,
+            response="lowpass",
+            cutoff_hz=frequency_hz,
+            numtaps=101,
+            mode="causal",
+        ).signal.voltage_v
+        zero_phase = filter_fir(
+            signal,
+            response="lowpass",
+            cutoff_hz=frequency_hz,
+            numtaps=101,
+            mode="zero_phase",
+        ).signal.voltage_v
+        interior = slice(2000, 8000)
+        basis = np.exp(-2j * np.pi * frequency_hz * time_s[interior])
+        causal_amplitude = 2 * abs(np.dot(causal[interior], basis)) / basis.size
+        zero_phase_amplitude = 2 * abs(np.dot(zero_phase[interior], basis)) / basis.size
+
+        self.assertAlmostEqual(zero_phase_amplitude, causal_amplitude**2, places=10)
+
+    @unittest.skipUnless(HAS_SCIPY, "SciPy analysis dependency is unavailable")
+    def test_fir_supports_low_high_bandpass_and_bandstop(self) -> None:
+        sample_rate_hz = 10_000.0
+        samples = 6000
+        frequencies = (500.0, 1500.0, 3000.0)
+        time_s = np.arange(samples, dtype=float) / sample_rate_hz
+        voltage_v = sum(np.sin(2 * np.pi * frequency * time_s) for frequency in frequencies)
+        signal = validate_waveform(np.column_stack((time_s, voltage_v)))
+        cases = {
+            "lowpass": (1000.0, {500.0}, {3000.0}),
+            "highpass": (2000.0, {3000.0}, {500.0}),
+            "bandpass": ([1000.0, 2000.0], {1500.0}, {500.0, 3000.0}),
+            "bandstop": ([1000.0, 2000.0], {500.0, 3000.0}, {1500.0}),
+        }
+
+        for response, (cutoff_hz, passed, rejected) in cases.items():
+            with self.subTest(response=response):
+                filtered = filter_fir(
+                    signal,
+                    response=response,
+                    cutoff_hz=cutoff_hz,
+                    numtaps=101,
+                    mode="zero_phase",
+                ).signal.voltage_v
+                interior = slice(500, -500)
+                interior_time = time_s[interior]
+                amplitudes = {
+                    frequency: 2
+                    * abs(
+                        np.dot(
+                            filtered[interior],
+                            np.exp(-2j * np.pi * frequency * interior_time),
+                        )
+                    )
+                    / interior_time.size
+                    for frequency in frequencies
+                }
+                for frequency in passed:
+                    self.assertGreater(amplitudes[frequency], 0.8)
+                for frequency in rejected:
+                    self.assertLess(amplitudes[frequency], 0.01)
+
+    @unittest.skipUnless(HAS_SCIPY, "SciPy analysis dependency is unavailable")
+    def test_fir_rejects_nonuniform_sampling_and_nyquist_cutoff(self) -> None:
+        data = self.waveform(1000, 10_000.0)
+        data[500:, 0] += 1e-5
+        with self.assertRaisesRegex(DataError, "uniformly sampled"):
+            filter_fir(
+                validate_waveform(data),
+                response="lowpass",
+                cutoff_hz=1000.0,
+                numtaps=31,
+                mode="causal",
+            )
+
+        with self.assertRaisesRegex(DataError, "below Nyquist"):
+            filter_fir(
+                validate_waveform(self.waveform(1000, 10_000.0)),
+                response="lowpass",
+                cutoff_hz=5000.0,
+                numtaps=31,
+                mode="causal",
+            )
 
     def test_even_fft_preserves_dc_and_nyquist_without_double_scaling(self) -> None:
         samples = 8

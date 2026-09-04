@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 from hashlib import sha256
+from importlib import import_module
 import json
 import os
 from pathlib import Path
@@ -12,23 +13,47 @@ import numpy as np
 
 from wavebench.data.signal_pipeline import (
     FrequencySignal,
+    FirFilterResult,
     TimeSignal,
     detrend_linear,
     fft_signal,
+    filter_fir,
     measure_frequency,
     measure_time,
     remove_dc,
     validate_waveform,
     window_signal,
 )
-from wavebench.errors import DataError, error_envelope
+from wavebench.errors import ConfigError, DataError, error_envelope
 from wavebench.services.run_analysis import evaluate_expect
 from wavebench.services.run_artifacts import RunStepRecord
-from wavebench.services.run_plan import RunStep
+from wavebench.services.run_plan import RunPlan, RunStep
 
 
 ANALYSIS_PIPELINE_SCHEMA = "wavebench.analysis_pipeline.v1"
 ANALYSIS_METRICS_SCHEMA = "wavebench.analysis_metrics.v1"
+
+
+def ensure_analysis_pipeline_dependencies(plan: RunPlan) -> None:
+    needs_scipy = any(
+        operation["op"] == "filter" and operation["family"] == "fir"
+        for step in plan.steps
+        if step.kind == "analysis.pipeline"
+        for operation in step.fields["operations"]
+    )
+    if not needs_scipy:
+        return
+    try:
+        scipy_signal = import_module("scipy.signal")
+    except ImportError as exc:
+        raise ConfigError(
+            "analysis FIR filter requires SciPy; install WaveBench with `.[analysis]`"
+        ) from exc
+    if not all(callable(getattr(scipy_signal, name, None)) for name in ("firwin", "lfilter", "filtfilt")):
+        raise ConfigError(
+            "analysis FIR filter requires compatible SciPy signal support; "
+            "install WaveBench with `.[analysis]`"
+        )
 
 
 def execute_analysis_pipeline(
@@ -55,6 +80,7 @@ def execute_analysis_pipeline(
     warnings: list[str] = []
     exports: list[dict[str, Any]] = []
     stages: list[dict[str, Any]] = []
+    filters: list[dict[str, Any]] = []
     sampling: dict[str, Any] | None = None
     window: dict[str, Any] | None = None
     source: dict[str, Any] = {
@@ -92,6 +118,25 @@ def execute_analysis_pipeline(
                 elif op == "detrend":
                     assert isinstance(signal, TimeSignal)
                     signal = detrend_linear(signal)
+                elif op == "filter":
+                    assert isinstance(signal, TimeSignal)
+                    result = filter_fir(
+                        signal,
+                        response=operation["response"],
+                        cutoff_hz=operation["cutoff_hz"],
+                        numtaps=operation["numtaps"],
+                        mode=operation["mode"],
+                    )
+                    signal = result.signal
+                    filter_metadata = _fir_filter_metadata(
+                        operation_index, operation, result
+                    )
+                    filters.append(filter_metadata)
+                    stage["filter"] = filter_metadata
+                    sampling.update({
+                        "sample_interval_s": result.sample_interval_s,
+                        "sample_rate_hz": result.sample_rate_hz,
+                    })
                 elif op == "window":
                     assert isinstance(signal, TimeSignal)
                     signal = window_signal(signal, operation["name"])
@@ -185,6 +230,8 @@ def execute_analysis_pipeline(
             "thd_ratio": "rss_in_band_harmonic_2_through_5_over_fundamental_peak",
         },
     }
+    if filters:
+        manifest["filters"] = filters
     if failed_stage is not None:
         manifest["failed_stage"] = failed_stage
     if failure is not None:
@@ -216,6 +263,55 @@ def execute_analysis_pipeline(
     if "expect" in step.fields:
         artifact["expect"] = evaluate_expect(metrics, step.fields["expect"])
     return artifact
+
+
+def _fir_filter_metadata(
+    operation_index: int,
+    operation: dict[str, Any],
+    result: FirFilterResult,
+) -> dict[str, Any]:
+    numtaps = operation["numtaps"]
+    mode = operation["mode"]
+    metadata: dict[str, Any] = {
+        "operation_index": operation_index,
+        "family": "fir",
+        "response": operation["response"],
+        "cutoff_hz": operation["cutoff_hz"],
+        "numtaps": numtaps,
+        "sample_rate_hz": result.sample_rate_hz,
+        "design_function": "scipy.signal.firwin",
+        "design_window": "hamming",
+        "scale": True,
+        "scipy_version": result.scipy_version,
+        "coefficients_sha256": sha256(
+            np.asarray(result.taps, dtype="<f8").tobytes()
+        ).hexdigest(),
+        "mode": mode,
+        "execution_function": (
+            "scipy.signal.lfilter" if mode == "causal" else "scipy.signal.filtfilt"
+        ),
+        "passes": 1 if mode == "causal" else 2,
+        "effective_magnitude_response": (
+            "single_pass" if mode == "causal" else "single_pass_squared"
+        ),
+        "nominal_single_pass_group_delay_samples": (numtaps - 1) / 2,
+        "nominal_single_pass_group_delay_s": (
+            (numtaps - 1) / 2 * result.sample_interval_s
+        ),
+    }
+    if mode == "causal":
+        metadata.update({
+            "boundary": "zero_initial_state",
+            "initial_state": "zeros",
+        })
+    else:
+        metadata.update({
+            "boundary": "odd_extension",
+            "method": "pad",
+            "padtype": "odd",
+            "padlen": 3 * numtaps,
+        })
+    return metadata
 
 
 def _load_source_waveform(

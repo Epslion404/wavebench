@@ -183,6 +183,38 @@ duration_s = 0.1
             "unknown field 'method'": '{ op = "remove_dc", method = "linear" }',
             "method must be 'linear'": '{ op = "detrend", method = "constant" }',
             "name must be one of": '{ op = "window", name = "bartlett" }',
+            "filter missing required field 'mode'": (
+                '{ op = "filter", family = "fir", response = "lowpass", '
+                'cutoff_hz = 1000, numtaps = 31 }'
+            ),
+            "family must be 'fir'": (
+                '{ op = "filter", family = "iir", response = "lowpass", '
+                'cutoff_hz = 1000, numtaps = 31, mode = "causal" }'
+            ),
+            "response must be one of": (
+                '{ op = "filter", family = "fir", response = "multiband", '
+                'cutoff_hz = 1000, numtaps = 31, mode = "causal" }'
+            ),
+            "cutoff_hz must be a positive number": (
+                '{ op = "filter", family = "fir", response = "lowpass", '
+                'cutoff_hz = [1000, 2000], numtaps = 31, mode = "causal" }'
+            ),
+            "two-element array": (
+                '{ op = "filter", family = "fir", response = "bandpass", '
+                'cutoff_hz = 1000, numtaps = 31, mode = "causal" }'
+            ),
+            "strictly increasing": (
+                '{ op = "filter", family = "fir", response = "bandstop", '
+                'cutoff_hz = [2000, 1000], numtaps = 31, mode = "causal" }'
+            ),
+            "numtaps must be an odd integer": (
+                '{ op = "filter", family = "fir", response = "lowpass", '
+                'cutoff_hz = 1000, numtaps = 32, mode = "causal" }'
+            ),
+            "mode must be 'causal' or 'zero_phase'": (
+                '{ op = "filter", family = "fir", response = "lowpass", '
+                'cutoff_hz = 1000, numtaps = 31, mode = "automatic" }'
+            ),
             "metrics must be a non-empty array": '{ op = "measure", metrics = [] }',
             "metric 'peak_frequency_hz' requires frequency-domain data": (
                 '{ op = "measure", metrics = ["peak_frequency_hz"] }'
@@ -201,6 +233,63 @@ duration_s = 0.1
                 with self.assertRaisesRegex(ConfigError, message):
                     load_run_plan(self.write_plan(self.analysis_plan(operations)))
 
+    def test_pipeline_normalizes_all_fir_responses_and_allows_serial_filters(self) -> None:
+        plan = load_run_plan(
+            self.write_plan(
+                self.analysis_plan(
+                    """
+  { op = "filter", family = "FIR", response = "LOWPASS", cutoff_hz = 1000, numtaps = 31, mode = "CAUSAL" },
+  { op = "filter", family = "fir", response = "highpass", cutoff_hz = 100, numtaps = 33, mode = "zero_phase" },
+  { op = "filter", family = "fir", response = "bandpass", cutoff_hz = [100, 1000], numtaps = 35, mode = "causal" },
+  { op = "filter", family = "fir", response = "bandstop", cutoff_hz = [49, 51], numtaps = 37, mode = "zero_phase" },
+  { op = "export", name = "filtered", formats = ["npy"] },
+"""
+                )
+            )
+        )
+
+        filters = plan.steps[1].fields["operations"][:4]
+        self.assertEqual(
+            [operation["response"] for operation in filters],
+            ["lowpass", "highpass", "bandpass", "bandstop"],
+        )
+        self.assertEqual(filters[0]["cutoff_hz"], 1000.0)
+        self.assertEqual(filters[2]["cutoff_hz"], [100.0, 1000.0])
+        self.assertEqual(
+            [operation["mode"] for operation in filters],
+            ["causal", "zero_phase", "causal", "zero_phase"],
+        )
+
+    def test_pipeline_fir_numeric_parameters_are_strict(self) -> None:
+        cases = (
+            (
+                "cutoff_hz must be a positive number",
+                'cutoff_hz = "1000", numtaps = 31',
+            ),
+            ("cutoff_hz must be finite", "cutoff_hz = nan, numtaps = 31"),
+            ("cutoff_hz must be > 0", "cutoff_hz = 0, numtaps = 31"),
+            ("numtaps must be an odd integer", "cutoff_hz = 1000, numtaps = 31.0"),
+            ("numtaps must be an odd integer", "cutoff_hz = 1000, numtaps = 1"),
+            ("numtaps must be an odd integer", "cutoff_hz = 1000, numtaps = true"),
+        )
+        for message, parameters in cases:
+            with self.subTest(parameters=parameters):
+                operations = (
+                    '{ op = "filter", family = "fir", response = "lowpass", '
+                    f'{parameters}, mode = "causal" }}, '
+                    '{ op = "export", name = "filtered", formats = ["npy"] }'
+                )
+                with self.assertRaisesRegex(ConfigError, message):
+                    load_run_plan(self.write_plan(self.analysis_plan(operations)))
+
+        unknown = (
+            '{ op = "filter", family = "fir", response = "lowpass", '
+            'cutoff_hz = 1000, numtaps = 31, mode = "causal", taps = [1] }, '
+            '{ op = "export", name = "filtered", formats = ["npy"] }'
+        )
+        with self.assertRaisesRegex(ConfigError, "unknown field 'taps'"):
+            load_run_plan(self.write_plan(self.analysis_plan(unknown)))
+
     def test_pipeline_rejects_duplicate_and_misordered_configuration(self) -> None:
         cases = {
             "at most once": (
@@ -217,6 +306,18 @@ duration_s = 0.1
             ),
             "must appear before fft": (
                 '{ op = "fft" }, { op = "window", name = "hann" }, '
+                '{ op = "export", name = "data", formats = ["npy"] }'
+            ),
+            "filter.*must appear before window": (
+                '{ op = "window", name = "hann" }, '
+                '{ op = "filter", family = "fir", response = "lowpass", '
+                'cutoff_hz = 1000, numtaps = 31, mode = "causal" }, '
+                '{ op = "export", name = "data", formats = ["npy"] }'
+            ),
+            "filter.*must appear before fft": (
+                '{ op = "fft" }, '
+                '{ op = "filter", family = "fir", response = "lowpass", '
+                'cutoff_hz = 1000, numtaps = 31, mode = "causal" }, '
                 '{ op = "export", name = "data", formats = ["npy"] }'
             ),
             "duplicate metric": (
