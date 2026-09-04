@@ -52,7 +52,9 @@
     <name>.csv
 ```
 
-`manifest.json` 的 schema 为 `wavebench.analysis_pipeline.v1`。它记录来源 step 及状态、来源 capture package／metadata／NPY 的 run-relative POSIX 路径、原始 NPY 的 SHA-256、规范化算子、逐阶段状态、采样信息、窗与相干增益、警告、导出、数值定义和结构化错误。某个后续算子失败时，已经完成的导出会保留，并由 `partial` 和 `failed_stage` 标明部分结果。
+`manifest.json` 的 schema 为 `wavebench.analysis_pipeline.v1`。它记录来源 step 及状态、来源 capture package／metadata／NPY 的 run-relative POSIX 路径、原始 NPY 的 SHA-256、规范化算子、逐阶段状态、采样信息、窗与相干增益、警告、导出、数值定义和结构化错误。某个后续算子失败时，已经完成的导出和 FIR stage 元数据会保留，并由 `partial` 和 `failed_stage` 标明部分结果。
+
+存在成功 FIR stage 时，manifest 条件性增加 `filters` 数组，并在对应 stage 中记录同一份滤波元数据。每项包括 operation index、响应、截止频率、tap 数、实际采样率、SciPy 版本、设计窗、缩放方式、执行函数、遍数、边界规则和单程名义群延迟。`coefficients_sha256` 是实际系数转为 little-endian float64 连续字节后的 SHA-256，可用于核对设计结果；manifest 不写入完整系数数组。零相位 stage 另外记录固定的 `method`、`padtype` 和 `padlen`。没有成功 FIR stage 的既有流水线不增加 `filters` 字段。
 
 `metrics.json` 的 schema 为 `wavebench.analysis_metrics.v1`，结构如下：
 
@@ -72,7 +74,7 @@
 
 频域 `amplitude_v` 是单边峰值幅度，不是 RMS。`noise_floor_v` 是排除 DC 与主峰后的非 DC 幅度 bin 中位数，表示每 bin 峰值幅度，不表示积分噪声。THD 使用 Nyquist 范围内的 H2～H5。
 
-HTML 报告在存在分析 step 时增加「信号处理 / Signal processing」区域，并在报告 manifest 中条件性增加 `analysis_pipelines`。没有分析 step 的旧报告 manifest 不增加该字段。
+HTML 报告在存在分析 step 时增加「信号处理 / Signal processing」区域；FIR 算子会同时显示 family、响应、截止频率、tap 数和执行模式。报告 manifest 条件性增加 `analysis_pipelines`，没有分析 step 的旧报告 manifest 不增加该字段。
 
 ## `summary.csv`
 

@@ -18,7 +18,7 @@ Supported step kinds:
   - analysis.pipeline
       required: source, operations
       optional : expect, on_failure
-      note     : Process one earlier scope.capture NPY after all hardware sessions close. Uses a validated linear NumPy operator list and never opens an instrument.
+      note     : Process one earlier scope.capture NPY after all hardware sessions close. Uses a validated linear operator list, checks optional dependencies on demand, and never opens an instrument.
   - dmm.read
       required: -
       optional : expect, function, on_failure, safety_gate
