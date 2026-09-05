@@ -246,11 +246,11 @@ scope.capture [steps.expect_fft] metrics:
 analysis.pipeline metrics:
   Time domain: voltage_min_v, voltage_max_v, voltage_mean_v, voltage_rms_v, voltage_vpp_v.
   Frequency domain: peak_frequency_hz, peak_amplitude_v, noise_floor_v, thd_ratio, and harmonic_2 through harmonic_5 frequency/amplitude fields.
-  PSD domain: export only; no scalar metrics.
+  PSD domain: measure_band requires name, band_hz, exclude_hz and metrics=mean_square_v2|rms_v|noise_rms_v. Metric keys are <name>_<metric>.
 
 analysis.pipeline PSD operation:
   psd requires method=welch, window=hann|hamming|blackman, nperseg>=4, 0<=noverlap<nperseg, nfft>=nperseg, detrend=none|constant|linear, average=mean|median.
   All parameters are explicit; lengths are integers. Segment windows are periodic.
-  Requires time data before window or fft. Only export may follow psd; at least one PSD export is required.
+  Requires time data before window or fft. Only export or measure_band may follow psd; at least one PSD result is required.
   Requires optional SciPy. Exports frequency_hz,psd_v2_per_hz with one-sided density scaling.
 ```

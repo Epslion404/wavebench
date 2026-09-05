@@ -86,6 +86,7 @@ thd_ratio = { max = 0.05 }
 | `fft` | 无 | 时域 → 频域 |
 | `psd` | Welch 分段参数，见下文 | 时域 → PSD |
 | `measure` | 非空 `metrics` 数组 | 观察当前域，不改变数据 |
+| `measure_band` | `name`、`band_hz`、`exclude_hz`、`metrics` | 观察 PSD，不改变数据 |
 | `export` | 安全的 `name`；`formats` 为 `npy`、`csv` 的非空子集 | 导出当前域，不改变数据 |
 
 `remove_dc`、`detrend`、`window` 和 `fft` 各至多出现一次；`remove_dc` 与 `detrend` 互斥。`filter` 可以重复，从而按声明顺序串联多个 FIR／IIR stage。去直流、去趋势和滤波必须位于窗口之前，所有时域变换必须位于 FFT 之前。测量指标和导出名称在同一流水线内不得重复，流水线至少包含一个 `measure` 或 `export`。
@@ -157,7 +158,19 @@ PSD 算子将时域数据转换为单边功率谱密度，单位为 `V²/Hz`。�
 | `detrend` | `none`、`constant` 或 `linear`，在每段加窗前执行 |
 | `average` | `mean` 或经过偏差修正的 `median` |
 
-PSD 可以跟在去直流、去趋势或 FIR／IIR 之后，但不能跟在整段 `window` 或 `fft` 之后。每条流水线至多有一个 PSD；PSD 之后只允许 `export`，且至少导出一次。需要同时生成 FFT 和 PSD 时，使用两个分析 step 引用同一个 capture。PSD 之前可以测量时域指标，PSD 本身暂不提供标量指标，不能复用 FFT 的峰值幅度、THD 或噪声底。
+PSD 可以跟在去直流、去趋势或 FIR／IIR 之后，但不能跟在整段 `window` 或 `fft` 之后。每条流水线至多有一个 PSD；PSD 之后允许 `export` 和 `measure_band`，至少执行其中一个。需要同时生成 FFT 和 PSD 时，使用两个分析 step 引用同一个 capture。PSD 的频带测量不复用 FFT 的峰值幅度、THD 或噪声底。
+
+### PSD 频带验收
+
+```toml
+{ op = "measure_band", name = "audio", band_hz = [20, 20000], exclude_hz = [[990, 1010]], metrics = ["mean_square_v2", "rms_v", "noise_rms_v"] }
+```
+
+所有字段必填；没有排除频带时显式填写 `exclude_hz = []`。频带边界必须非负且严格递增，排除区间必须位于测量频带内；运行时测量频带不得超过实际 Nyquist。按闭区间选择 bin 中心，并按闭区间排除；结果为剩余 bin 密度之和乘 bin 间距，DC 与偶数点 Nyquist 均使用完整 bin 权重。空结果写入 `null` 和警告。
+
+`mean_square_v2` 单位为 V²，`rms_v` 为其平方根，单位为 V；没有负载信息时不转换为瓦特。`noise_rms_v` 使用同一积分，但要求显式提供非空信号排除区间，其噪声含义依赖声明的频带选择。所有指标均应用 `exclude_hz`；需要未排除的带内 RMS 时另建一个名称不同的测量。
+
+上例产生 `audio_mean_square_v2`、`audio_rms_v` 和 `audio_noise_rms_v`，可在 `[steps.expect]` 或离线配方 `[expect]` 中使用 min/max。命名测量不可重名。积分沿用所选 Welch 均值或中位数估计，不额外重标定。
 
 运行时按实际时间轴检查等间隔采样，容差为 `rtol=1e-6, atol=0`。样本数小于 `nperseg` 时失败，不自动缩短段长。只处理完整段；不足一段的尾点不补齐，并在 manifest 中记录数量。仅有一段时仍可导出，同时记录没有跨段平均的警告。
 

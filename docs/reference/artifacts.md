@@ -86,7 +86,7 @@ IIR 项记录 design、响应、截止频率、原型阶数、变换后的数字
 
 成功执行 PSD 时，manifest 条件性增加 `psd` 对象，并在对应 stage 中记录同一份元数据，输出域为 `psd`。该对象包括规范化参数、执行函数、SciPy 版本、实际采样率、周期窗标记、窗功率增益、窗 SHA-256、完整分段数和丢弃尾点数。窗 SHA-256 使用实际周期窗的 little-endian float64 字节计算。`bin_spacing_hz` 为采样率除以 `nfft`；`segment_frequency_scale_hz` 为采样率除以 `nperseg`，不表示加窗后的等效噪声带宽。
 
-PSD 元数据同时记录单边密度缩放、`V^2/Hz` 单位和归一化公式。仅有一段或存在尾点时写入警告；后续导出失败仍保留成功 PSD 的元数据。没有成功 PSD 的流水线不增加 `psd` 字段，schema 继续使用 `wavebench.analysis_pipeline.v1`。PSD 不产生新的标量指标，未选择时域测量时 `metrics` 为空映射。HTML 报告显示 Welch 分段参数、警告和导出链接。
+PSD 元数据同时记录单边密度缩放、`V^2/Hz` 单位和归一化公式。仅有一段或存在尾点时写入警告；后续导出失败仍保留成功 PSD 的元数据。没有成功 PSD 的流水线不增加 `psd` 字段，schema 继续使用 `wavebench.analysis_pipeline.v1`。`measure_band` 在对应 stage 的 `measurement` 中记录选中 bin 数量、间距、积分和边界规则，以及 Welch 平均方式；标量保存为 `<name>_<metric>` 并复用现有 `metrics` 与 `expect`。没有测量算子时 `metrics` 为空映射。HTML 报告显示 Welch 分段参数、警告和导出链接。
 
 频域 `amplitude_v` 是单边峰值幅度，不是 RMS。`noise_floor_v` 是排除 DC 与主峰后的非 DC 幅度 bin 中位数，表示每 bin 峰值幅度，不表示积分噪声。THD 使用 Nyquist 范围内的 H2～H5。
 

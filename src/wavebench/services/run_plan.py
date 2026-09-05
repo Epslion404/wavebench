@@ -21,6 +21,7 @@ from wavebench.data.signal_pipeline import (
     normalize_psd_parameters,
 )
 from wavebench.errors import ConfigError, DataError
+from wavebench.data.pipeline_operations import normalize_band
 from wavebench.services.frequency_response import FIT_METHODS
 from wavebench.services.frequency_response_adaptive import normalize_frequency_response_adaptive
 from wavebench.services.frequency_response_baseline import normalize_frequency_response_baseline
@@ -459,12 +460,12 @@ def format_run_plan_schema() -> str:
         "analysis.pipeline metrics:",
         "  Time domain: voltage_min_v, voltage_max_v, voltage_mean_v, voltage_rms_v, voltage_vpp_v.",
         "  Frequency domain: peak_frequency_hz, peak_amplitude_v, noise_floor_v, thd_ratio, and harmonic_2 through harmonic_5 frequency/amplitude fields.",
-        "  PSD domain: export only; no scalar metrics.",
+        "  PSD domain: measure_band requires name, band_hz, exclude_hz and metrics=mean_square_v2|rms_v|noise_rms_v. Metric keys are <name>_<metric>.",
         "",
         "analysis.pipeline PSD operation:",
         "  psd requires method=welch, window=hann|hamming|blackman, nperseg>=4, 0<=noverlap<nperseg, nfft>=nperseg, detrend=none|constant|linear, average=mean|median.",
         "  All parameters are explicit; lengths are integers. Segment windows are periodic.",
-        "  Requires time data before window or fft. Only export may follow psd; at least one PSD export is required.",
+        "  Requires time data before window or fft. Only export or measure_band may follow psd; at least one PSD result is required.",
         "  Requires optional SciPy. Exports frequency_hz,psd_v2_per_hz with one-sided density scaling.",
     ])
     return "\n".join(lines)
@@ -1285,9 +1286,11 @@ def normalize_analysis_operations(prefix: str, fields: dict[str, Any]) -> None:
     normalized: list[dict[str, Any]] = []
     transforms: set[str] = set()
     measured: set[str] = set()
+    result_names: set[str] = set()
     export_names: set[str] = set()
     domain = "time"
     has_result = False
+    psd_result = False
 
     allowed_fields = {
         "remove_dc": {"op"},
@@ -1308,6 +1311,7 @@ def normalize_analysis_operations(prefix: str, fields: dict[str, Any]) -> None:
         "fft": {"op"},
         "psd": {"op", "method", "window", "nperseg", "noverlap", "nfft", "detrend", "average"},
         "measure": {"op", "metrics"},
+        "measure_band": {"op", "name", "band_hz", "exclude_hz", "metrics"},
         "export": {"op", "name", "formats"},
     }
     required_fields = {
@@ -1316,6 +1320,7 @@ def normalize_analysis_operations(prefix: str, fields: dict[str, Any]) -> None:
         "window": {"name"},
         "psd": {"method", "window", "nperseg", "noverlap", "nfft", "detrend", "average"},
         "measure": {"metrics"},
+        "measure_band": {"name", "band_hz", "exclude_hz", "metrics"},
         "export": {"name", "formats"},
     }
 
@@ -1340,8 +1345,8 @@ def normalize_analysis_operations(prefix: str, fields: dict[str, Any]) -> None:
             raise ConfigError(f"{operation_prefix} {op} missing required field {names}")
 
         operation: dict[str, Any] = {"op": op}
-        if domain == "psd" and op != "export":
-            raise ConfigError(f"{operation_prefix}: only export is supported after psd")
+        if domain == "psd" and op not in {"export", "measure_band"}:
+            raise ConfigError(f"{operation_prefix}: only export or measure_band is supported after psd")
         if op == "psd":
             if domain != "time" or "window" in transforms:
                 raise ConfigError(f"{operation_prefix}: psd requires time data before window or fft")
@@ -1514,6 +1519,19 @@ def normalize_analysis_operations(prefix: str, fields: dict[str, Any]) -> None:
             except DataError as exc:
                 raise ConfigError(f"{operation_prefix}: {exc}") from exc
             domain = "psd"
+        elif op == "measure_band":
+            if domain != "psd":
+                raise ConfigError(f"{operation_prefix}: measure_band requires PSD data")
+            try:
+                operation = normalize_band(raw_operation)
+            except DataError as exc:
+                raise ConfigError(f"{operation_prefix}: {exc}") from exc
+            keys = {f"{operation['name']}_{metric}" for metric in operation["metrics"]}
+            if keys & measured or operation["name"] in result_names:
+                raise ConfigError(f"{operation_prefix}: duplicate measurement name")
+            result_names.add(operation["name"])
+            measured.update(keys)
+            has_result = psd_result = True
         elif op == "measure":
             raw_metrics = raw_operation["metrics"]
             if not isinstance(raw_metrics, list) or not raw_metrics:
@@ -1565,12 +1583,13 @@ def normalize_analysis_operations(prefix: str, fields: dict[str, Any]) -> None:
             operation["name"] = name
             operation["formats"] = formats
             has_result = True
+            psd_result = psd_result or domain == "psd"
         normalized.append(operation)
 
     if not has_result:
         raise ConfigError(f"{prefix}.operations requires at least one measure or export operation")
-    if domain == "psd" and normalized[-1]["op"] != "export":
-        raise ConfigError(f"{prefix}.operations requires an export after psd")
+    if domain == "psd" and not psd_result:
+        raise ConfigError(f"{prefix}.operations requires export or measure_band after psd")
     fields["operations"] = normalized
 
     if "expect" in fields:

@@ -29,6 +29,7 @@ from wavebench.data.signal_pipeline import (
     welch_psd,
 )
 from wavebench.errors import ConfigError, DataError, error_envelope
+from wavebench.data.pipeline_operations import measure_band
 from wavebench.services.run_analysis import evaluate_expect
 from wavebench.services.run_artifacts import RunStepRecord
 from wavebench.services.run_plan import RunPlan, RunStep
@@ -134,6 +135,9 @@ def execute_pipeline(
         if operation["op"] == "measure"
         for metric in operation["metrics"]
     }
+    for operation in operations:
+        if operation["op"] == "measure_band":
+            metrics.update({f"{operation['name']}_{metric}": None for metric in operation["metrics"]})
     warnings: list[str] = []
     exports: list[dict[str, Any]] = []
     stages: list[dict[str, Any]] = []
@@ -255,6 +259,14 @@ def execute_pipeline(
                     if psd_warnings:
                         stage["warnings"] = psd_warnings
                         _extend_unique(warnings, psd_warnings)
+                elif op == "measure_band":
+                    assert isinstance(signal, PsdSignal)
+                    measured, metadata, operation_warnings = measure_band(signal, operation)
+                    metrics.update(measured)
+                    stage["measurement"] = metadata
+                    if operation_warnings:
+                        stage["warnings"] = operation_warnings
+                        _extend_unique(warnings, operation_warnings)
                 elif op == "measure":
                     if isinstance(signal, TimeSignal):
                         measured = measure_time(signal, operation["metrics"])
