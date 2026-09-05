@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from math import gcd
 from hashlib import sha256
 from typing import Any
 
@@ -121,6 +122,72 @@ def smooth_signal(signal: TimeSignal, operation: dict[str, Any]) -> tuple[TimeSi
     if not np.all(np.isfinite(voltage)):
         raise DataError("smooth output must be finite")
     return TimeSignal(signal.time_s.copy(), voltage), metadata
+
+
+def normalize_resample(operation: dict[str, Any]) -> dict[str, Any]:
+    up = integer(operation["up"], "up", 1, 2**63 - 1)
+    down = integer(operation["down"], "down", 1, 2**63 - 1)
+    divisor = gcd(up, down)
+    up, down = up // divisor, down // divisor
+    if max(up, down) > 10000:
+        raise DataError("reduced resampling factors must not exceed 10000")
+    if operation["window"] != "kaiser":
+        raise DataError("resample window must be kaiser")
+    beta = number(operation["beta"], "beta")
+    if beta > 30:
+        raise DataError("resample beta must not exceed 30")
+    if operation["padtype"] not in ("constant", "line"):
+        raise DataError("resample padtype must be constant or line")
+    return dict(op="resample", up=up, down=down, window="kaiser", beta=beta,
+                padtype=operation["padtype"])
+
+
+def resample_signal(signal: TimeSignal, operation: dict[str, Any]) -> tuple[TimeSignal, dict]:
+    operation = normalize_resample(operation)
+    if signal.window_name is not None or signal.coherent_gain != 1:
+        raise DataError("resample must precede the whole-signal window")
+    interval_s = _uniform_sample_interval(signal, "resample")
+    up, down = operation["up"], operation["down"]
+    input_samples = len(signal.voltage_v)
+    output_samples = (input_samples * up + down - 1) // down
+    if output_samples > 20000000:
+        raise DataError("resample output exceeds 20000000 samples")
+    output_interval = interval_s * down / up
+    if (not np.isfinite(output_interval) or output_interval <= 0
+            or not np.isfinite(1 / output_interval) or not np.isfinite(1 / interval_s)
+            or not np.isfinite((1 / interval_s) * up)):
+        raise DataError("resample requires finite input and output sample rates")
+    from scipy import __version__ as scipy_version
+    from scipy.signal import firwin, resample_poly
+
+    # Pin the filter design instead of inheriting future resample_poly defaults.
+    rate = max(up, down)
+    taps = (np.ones(1) if up == down else
+            firwin(20 * rate + 1, 1 / rate, window=("kaiser", operation["beta"])))
+    if not np.all(np.isfinite(taps)):
+        raise DataError("resample filter coefficients must be finite")
+    voltage = resample_poly(signal.voltage_v, up, down, window=taps,
+                            padtype=operation["padtype"])
+    times = float(signal.time_s[0]) + np.arange(output_samples) * output_interval
+    if (len(voltage) != output_samples or not np.all(np.isfinite(voltage))
+            or not np.all(np.isfinite(times)) or not np.all(np.diff(times) > 0)):
+        raise DataError("resample output must be finite with a strictly increasing time axis")
+    if output_samples > 1 and not np.allclose(np.diff(times), output_interval, rtol=1e-6, atol=0):
+        raise DataError("resample time axis cannot represent the requested spacing accurately")
+    return TimeSignal(times, voltage), {
+        **operation, "scipy_version": scipy_version,
+        "execution_function": "scipy.signal.resample_poly",
+        "input_samples": input_samples, "output_samples": output_samples,
+        "input_sample_rate_hz": 1 / interval_s,
+        "sample_rate_hz": 1 / output_interval, "sample_interval_s": output_interval,
+        "time_start_s": float(times[0]), "time_stop_s": float(times[-1]),
+        "output_length_rule": "ceil(input_samples * up / down)",
+        "filter_numtaps": len(taps), "filter_cutoff_normalized": 1 / rate,
+        "filter_design_rate_hz": (1 / interval_s) * up,
+        "filter_coefficients_sha256": sha256(np.asarray(taps, dtype="<f8").tobytes()).hexdigest(),
+        "boundary": "zero_extension" if operation["padtype"] == "constant" else "endpoint_linear_extension",
+        "time_shift_applied_s": 0,
+    }
 
 
 def detect_peaks(signal: TimeSignal | FrequencySignal | PsdSignal, operation: dict[str, Any]) -> dict:

@@ -21,7 +21,9 @@ from wavebench.data.signal_pipeline import (
     normalize_psd_parameters,
 )
 from wavebench.errors import ConfigError, DataError
-from wavebench.data.pipeline_operations import normalize_band, normalize_peaks, normalize_smooth
+from wavebench.data.pipeline_operations import (
+    normalize_band, normalize_peaks, normalize_smooth, normalize_resample,
+)
 from wavebench.services.frequency_response import FIT_METHODS
 from wavebench.services.frequency_response_adaptive import normalize_frequency_response_adaptive
 from wavebench.services.frequency_response_baseline import normalize_frequency_response_baseline
@@ -471,6 +473,8 @@ def format_run_plan_schema() -> str:
         "  Peak distance/width use seconds in time and Hz in spectra; spectral polarity must be positive. Produces <name>_count and JSON/CSV tables without changing signal domain.",
         "  smooth requires method=moving_average|savgol, odd window_length=3..1001, mode=centered|causal, boundary=reflect|edge. Causal requires edge.",
         "  savgol requires polyorder=0..min(5,window_length-1); moving_average rejects polyorder. Smooth requires uniform time data before window/fft/psd.",
+        "  resample requires positive integer up/down (reduced factors <=10000), window=kaiser, beta=0..30, padtype=constant|line. Output is limited to 20000000 samples.",
+        "  Resample requires uniform time data before window/fft/psd; preserves time origin, uses a pinned polyphase FIR design and updates downstream sampling metadata.",
     ])
     return "\n".join(lines)
 
@@ -1318,6 +1322,7 @@ def normalize_analysis_operations(prefix: str, fields: dict[str, Any]) -> None:
         "measure_band": {"op", "name", "band_hz", "exclude_hz", "metrics"},
         "peaks": {"op", "name", "polarity", "height", "prominence", "distance", "width", "max_peaks", "metrics"},
         "smooth": {"op", "method", "window_length", "polyorder", "mode", "boundary"},
+        "resample": {"op", "up", "down", "window", "beta", "padtype"},
         "export": {"op", "name", "formats"},
     }
     required_fields = {
@@ -1329,6 +1334,7 @@ def normalize_analysis_operations(prefix: str, fields: dict[str, Any]) -> None:
         "measure_band": {"name", "band_hz", "exclude_hz", "metrics"},
         "peaks": {"name", "polarity", "height", "prominence", "distance", "width", "max_peaks", "metrics"},
         "smooth": {"method", "window_length", "mode", "boundary"},
+        "resample": {"up", "down", "window", "beta", "padtype"},
         "export": {"name", "formats"},
     }
 
@@ -1369,11 +1375,12 @@ def normalize_analysis_operations(prefix: str, fields: dict[str, Any]) -> None:
                 raise ConfigError(f"{prefix} operation {op!r} must appear before window")
             transforms.add(op)
 
-        if op == "smooth":
+        if op in {"smooth", "resample"}:
             if domain != "time" or "window" in transforms:
-                raise ConfigError(f"{operation_prefix}: smooth requires time data before window or fft")
+                raise ConfigError(f"{operation_prefix}: {op} requires time data before window or fft")
             try:
-                operation = normalize_smooth(raw_operation)
+                operation = (normalize_smooth(raw_operation) if op == "smooth"
+                             else normalize_resample(raw_operation))
             except DataError as exc:
                 raise ConfigError(f"{operation_prefix}: {exc}") from exc
         if op == "filter":

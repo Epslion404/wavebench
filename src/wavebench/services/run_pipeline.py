@@ -29,7 +29,7 @@ from wavebench.data.signal_pipeline import (
     welch_psd,
 )
 from wavebench.errors import ConfigError, DataError, error_envelope
-from wavebench.data.pipeline_operations import measure_band, detect_peaks, smooth_signal
+from wavebench.data.pipeline_operations import measure_band, detect_peaks, smooth_signal, resample_signal
 from wavebench.services.run_analysis import evaluate_expect
 from wavebench.services.run_artifacts import RunStepRecord
 from wavebench.services.run_plan import RunPlan, RunStep
@@ -51,14 +51,16 @@ def ensure_operation_dependencies(all_operations: list[dict[str, Any]]) -> None:
     operations = [
         operation
         for operation in all_operations
-        if operation["op"] in {"filter", "psd", "peaks"}
+        if operation["op"] in {"filter", "psd", "peaks", "resample"}
         or operation["op"] == "smooth" and operation["method"] == "savgol"
     ]
     if not operations:
         return
     required_functions: set[str] = set()
     for operation in operations:
-        if operation["op"] == "smooth":
+        if operation["op"] == "resample":
+            required_functions.update({"resample_poly", "firwin"})
+        elif operation["op"] == "smooth":
             required_functions.add("savgol_coeffs")
         elif operation["op"] == "peaks":
             required_functions.add("find_peaks")
@@ -178,12 +180,17 @@ def execute_pipeline(
                 elif op == "detrend":
                     assert isinstance(signal, TimeSignal)
                     signal = detrend_linear(signal)
-                elif op == "smooth":
+                elif op in {"smooth", "resample"}:
                     assert isinstance(signal, TimeSignal)
-                    signal, metadata = smooth_signal(signal, operation)
+                    signal, metadata = (smooth_signal(signal, operation) if op == "smooth"
+                                        else resample_signal(signal, operation))
                     metadata["operation_index"] = operation_index
                     stage["transformation"] = metadata
                     transformations.append(metadata)
+                    if op == "resample":
+                        sampling = _time_sampling(signal)
+                        sampling.update({"sample_interval_s": metadata["sample_interval_s"],
+                                         "sample_rate_hz": metadata["sample_rate_hz"]})
                 elif op == "filter":
                     assert isinstance(signal, TimeSignal)
                     if operation["family"] == "fir":

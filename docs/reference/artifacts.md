@@ -2,6 +2,8 @@
 
 ## 独立离线分析
 
+成功重采样也写入 `transformations` 和 stage 的 `transformation`，记录约分比例、输入／输出样本数、采样率、间隔、时间范围、输出长度规则、固定滤波器 tap 数与截止频率、设计采样率、系数摘要、SciPy 版本和边界规则。manifest 的 `sampling` 随重采样更新，后续算子记录实际使用的新采样率。
+
 成功平滑时，manifest 条件性增加 `transformations`，对应 stage 记录同一份 `transformation`。其中包括规范化参数、实际采样率、左右边界影响样本数、系数摘要、时间轴是否平移、可定义的名义群延迟；Savitzky–Golay 另外记录 SciPy 版本和窗口评价位置。未执行成功时不增加该项，后续失败保留此前的变换记录。
 
 `peaks` 将峰列表写入处理目录的 `peaks/<name>.json` 和 `peaks/<name>.csv`。JSON 使用 `wavebench.peaks.v1`，记录数据域、单位、SciPy 版本、检测输入两列 little-endian float64 的 SHA-256、完整数量、保留数量、截断状态和峰属性。CSV 列为 `index,position,value,prominence,width,polarity`；极性以 1／-1 表示。manifest、对应 stage 及 step artifact 条件性增加峰表路径与文件摘要。后续算子失败保留已完成峰表，截断会记录警告。

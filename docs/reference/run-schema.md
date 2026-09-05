@@ -83,6 +83,7 @@ thd_ratio = { max = 0.05 }
 | `detrend` | `method = "linear"` | 时域 → 时域 |
 | `filter` | FIR 或 IIR 的判别式设计参数 | 时域 → 时域 |
 | `smooth` | 方法、奇数窗口长度、模式和边界，见下文 | 时域 → 时域 |
+| `resample` | 比例、Kaiser 窗参数和边界，见下文 | 时域 → 新采样率时域 |
 | `window` | `name = "hann|hamming|blackman"` | 时域 → 时域 |
 | `fft` | 无 | 时域 → 频域 |
 | `psd` | Welch 分段参数，见下文 | 时域 → PSD |
@@ -91,7 +92,7 @@ thd_ratio = { max = 0.05 }
 | `peaks` | 命名检测、筛选条件和数量上限，见下文 | 观察当前域，不改变数据 |
 | `export` | 安全的 `name`；`formats` 为 `npy`、`csv` 的非空子集 | 导出当前域，不改变数据 |
 
-`remove_dc`、`detrend`、`window` 和 `fft` 各至多出现一次；`remove_dc` 与 `detrend` 互斥。`filter` 可以重复，从而按声明顺序串联多个 FIR／IIR stage。去直流、去趋势和滤波必须位于窗口之前，所有时域变换必须位于 FFT 之前。测量指标和导出名称在同一流水线内不得重复，流水线至少包含一个 `measure` 或 `export`。
+`remove_dc`、`detrend`、`window` 和 `fft` 各至多出现一次；`remove_dc` 与 `detrend` 互斥。`filter`、`smooth` 和 `resample` 可以重复，按声明顺序执行。去直流、去趋势、滤波、平滑和重采样必须位于整段窗口之前，所有时域变换必须位于 FFT／PSD 之前。测量指标和导出名称在同一流水线内不得重复，流水线至少包含一个 `measure`、`measure_band`、`peaks` 或 `export`。
 
 ### 时域平滑
 
@@ -105,6 +106,18 @@ thd_ratio = { max = 0.05 }
 `centered` 使用左右等长窗口，边界可选 `reflect`（不重复端点的反射）或 `edge`（首末值延拓）。`causal` 仅使用当前及过去样本，起始处只允许 `edge`，不允许引入未来样本的反射。输出样本数和时间轴不变，不自动补偿延迟。
 
 移动平均各点等权；因果模式名义群延迟为 `(window_length - 1) / 2` 个样本。Savitzky–Golay 使用零阶导数系数，居中模式在窗口中点评价，因果模式在末点评价；因果模式不声明固定群延迟。系数非有限或常量增益校验失败时明确失败，不静默修正。移动平均仅使用 NumPy，Savitzky–Golay 按需检查 SciPy 的 `savgol_coeffs`。
+
+### 有理数比例重采样
+
+```toml
+{ op = "resample", up = 2, down = 3, window = "kaiser", beta = 5, padtype = "line" }
+```
+
+全部参数必填。`up`／`down` 是正整数，约分后各不超过 10000；输入整数上限为 `2^63 - 1`，输出不超过 20000000 个样本。`window` 固定为 `kaiser`，`beta` 为 0～30 的有限数；边界选 `constant`（零延拓）或 `line`（按首末点连线延拓）。只接受等间隔时域输入，必须位于整段 window、FFT 和 PSD 之前。
+
+实现使用 `resample_poly` 和显式设计的对称 FIR。设约分后的 `rate = max(up, down)`，滤波器为 `20 × rate + 1` taps、归一化截止频率 `1 / rate` 的 Kaiser 窗设计，设计采样率为原采样率乘 `up`。比例为 1 时直接保留数据，不滤波。该滤波器提供抗混叠，实际通带与阻带性能随参数变化，不等同于理想砖墙滤波。
+
+输出长度为 `ceil(N × up / down)`，时间轴为 `t0 + arange(N_out) × dt × down / up`。保留时间原点，可能产生位于原末样本之后、但属于输出采样网格的末点；边界值由延拓合同决定。不通过拉伸时间轴强行匹配原末点。无法表示有限且严格递增的新时间轴时失败。后续滤波、峰值、FFT 和 PSD 使用新采样率，原始 NPY 保持不变。
 
 ### FIR 滤波
 

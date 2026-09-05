@@ -257,4 +257,6 @@ analysis.pipeline PSD operation:
   Peak distance/width use seconds in time and Hz in spectra; spectral polarity must be positive. Produces <name>_count and JSON/CSV tables without changing signal domain.
   smooth requires method=moving_average|savgol, odd window_length=3..1001, mode=centered|causal, boundary=reflect|edge. Causal requires edge.
   savgol requires polyorder=0..min(5,window_length-1); moving_average rejects polyorder. Smooth requires uniform time data before window/fft/psd.
+  resample requires positive integer up/down (reduced factors <=10000), window=kaiser, beta=0..30, padtype=constant|line. Output is limited to 20000000 samples.
+  Resample requires uniform time data before window/fft/psd; preserves time origin, uses a pinned polyphase FIR design and updates downstream sampling metadata.
 ```

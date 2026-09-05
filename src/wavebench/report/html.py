@@ -2054,6 +2054,10 @@ def _signal_processing_block(run: RunPackage, output_dir: Path) -> str:
 
 def _analysis_operation_label(operation: dict[str, Any]) -> str:
     op = str(operation.get("op", ""))
+    if op in {"smooth", "resample", "measure_band", "peaks"}:
+        return op + "(" + ", ".join(
+            f"{key}={value}" for key, value in operation.items() if key != "op"
+        ) + ")"
     if op == "psd":
         return "psd(" + ", ".join(
             f"{key}={operation.get(key, '')}"
