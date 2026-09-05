@@ -128,6 +128,8 @@ def write_analysis_report(paths: list[Path], output: Path) -> Path:
     output = output.resolve()
     if output.exists():
         raise ConfigError("analysis report output must be a new file")
+    if any((parent / "metadata.json").is_file() for parent in output.parents):
+        raise ConfigError("analysis report must not modify a source capture package")
     for root, _, artifact in entries:
         try:
             manifest = json.loads(artifact_file(root, artifact["analysis_pipeline"]["manifest"]).read_text())

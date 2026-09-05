@@ -26,6 +26,9 @@ def test_comparison_uses_saved_exports_and_preserves_metrics(tmp_path, analysis_
         write_analysis_report([first], tmp_path / "compare.html")
     with pytest.raises(ConfigError, match="source capture"):
         write_analysis_report([first], capture / "report.html")
+    (first / "manifest.json").write_text("invalid json")
+    with pytest.raises(ConfigError, match="source capture"):
+        write_analysis_report([first], capture / "report.html")
 
 
 def test_bad_exports_fall_back_to_csv_and_show_warning(tmp_path, analysis_input):
