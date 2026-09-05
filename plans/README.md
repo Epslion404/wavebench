@@ -1,6 +1,6 @@
 # Run plan 示例
 
-这里的 TOML 文件是实验计划，不是模拟器。文件名里有 `example`，也不代表可以在没有仪器时直接执行；很多计划会设置 source、打开输出、触发采集，或者依赖一份本地 baseline。
+这里包含实验 RunPlan 和独立离线分析配方。文件名里有 `example`，不代表 RunPlan 可以在没有仪器时直接执行；很多计划会设置 source、打开输出、触发采集，或者依赖一份本地 baseline。`*_recipe.toml` 使用 `analysis` 命令处理已有采集包，不作为 RunPlan 执行。
 
 ## 先做离线检查
 
@@ -14,6 +14,38 @@ wavebench run check --plan plans/example_scope_expect_quality.toml
 `run verify` 会读取配置并查询相关仪器，适合执行前预检。`run plan` 会进行真实实验，执行前应确认接线、scope coupling、输出状态、保护限值和 `[restore]` 范围。`run report` 和 `run calibrate` 读取已有产物，不需要再次连接仪器；校准相关拟合需要安装 `.[analysis]`。
 
 `example_signal_processing_pipeline.toml` 包含 FIR 带阻、IIR 高通、因果和零相位处理，需要安装 `.[analysis]`。`run check` 只在 Plan 选择需要 SciPy 的算子时检查该可选依赖。
+
+## 信号处理功能展示
+
+[完整 RunPlan 示例](example_signal_processing_pipeline.toml) 采集 CH1 一次，然后对同一份原始 NPY 执行三个独立分析步骤：
+
+| 步骤 ID | 展示内容 | 报告产物 |
+| --- | --- | --- |
+| `spectrum_main` | 时域统计、去直流、FIR 带阻、IIR 高通、Hann 窗、FFT 与谐波验收 | 原始波形、滤波频谱与 THD |
+| `processed_main` | Savitzky–Golay 平滑、采样率减半、FFT、多峰检测 | 处理后波形、频谱、峰表与峰标记 |
+| `density_main` | Welch PSD、带内均方值／RMS、排除基波频带后的噪声 RMS | PSD 曲线及频带验收结果 |
+
+演示输入为约 1 Vpp 的 1 kHz 正弦，均匀采样率至少 20 kSa/s、至少 4096 点。信号源与采集参数需事先配置；示例不会设置或开启信号源。频率误差受实际记录长度和 FFT bin 间距影响，验收阈值仅供演示，应按实际输入调整。采集或前两个分析步骤失败时继续尝试后续分析，最终 run 仍记录失败。
+
+```bash
+wavebench run check --plan plans/example_signal_processing_pipeline.toml
+```
+
+完成接线确认与 `run verify` 后，通过 `run plan` 执行。已有运行产物可以直接生成报告：
+
+```bash
+wavebench run report data/runs/<run-dir>
+wavebench analysis report data/runs/<run-dir> --output data/processing_comparison.html
+```
+
+报告可比较原始／处理后波形及两条 FFT 曲线，PSD 使用独立单位显示。派生文件位于 run 的 `processing/`，原始 NPY 保持不变。独立比较报告的输出文件必须尚不存在。
+
+只有历史采集包时，可使用 [FFT 配方](example_analysis_recipe.toml)、[PSD 配方](example_psd_recipe.toml) 或[平滑／重采样／峰值配方](example_processed_recipe.toml)：
+
+```bash
+wavebench analysis run --capture data/raw/<capture-dir> --channel 1 --recipe plans/example_processed_recipe.toml --output data/analysis_demo
+wavebench analysis report data/analysis_demo --output data/analysis_demo.html
+```
 
 ## 计划分类
 
