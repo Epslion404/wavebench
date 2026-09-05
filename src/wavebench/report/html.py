@@ -2047,6 +2047,11 @@ def _signal_processing_block(run: RunPackage, output_dir: Path) -> str:
 
 def _analysis_operation_label(operation: dict[str, Any]) -> str:
     op = str(operation.get("op", ""))
+    if op == "psd":
+        return "psd(" + ", ".join(
+            f"{key}={operation.get(key, '')}"
+            for key in ("method", "window", "nperseg", "noverlap", "nfft", "detrend", "average")
+        ) + ")"
     if op != "filter":
         return op
     cutoff = operation.get("cutoff_hz")

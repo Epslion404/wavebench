@@ -15,6 +15,7 @@ from wavebench.data.signal_pipeline import (
     FrequencySignal,
     FirFilterResult,
     IirFilterResult,
+    PsdSignal,
     TimeSignal,
     detrend_linear,
     fft_signal,
@@ -25,6 +26,7 @@ from wavebench.data.signal_pipeline import (
     remove_dc,
     validate_waveform,
     window_signal,
+    welch_psd,
 )
 from wavebench.errors import ConfigError, DataError, error_envelope
 from wavebench.services.run_analysis import evaluate_expect
@@ -37,18 +39,20 @@ ANALYSIS_METRICS_SCHEMA = "wavebench.analysis_metrics.v1"
 
 
 def ensure_analysis_pipeline_dependencies(plan: RunPlan) -> None:
-    filters = [
+    operations = [
         operation
         for step in plan.steps
         if step.kind == "analysis.pipeline"
         for operation in step.fields["operations"]
-        if operation["op"] == "filter"
+        if operation["op"] in {"filter", "psd"}
     ]
-    if not filters:
+    if not operations:
         return
     required_functions: set[str] = set()
-    for operation in filters:
-        if operation["family"] == "fir":
+    for operation in operations:
+        if operation["op"] == "psd":
+            required_functions.update({"welch", "get_window"})
+        elif operation["family"] == "fir":
             required_functions.add("firwin")
             required_functions.add(
                 "lfilter" if operation["mode"] == "causal" else "filtfilt"
@@ -68,7 +72,7 @@ def ensure_analysis_pipeline_dependencies(plan: RunPlan) -> None:
         scipy_signal = import_module("scipy.signal")
     except ImportError as exc:
         raise ConfigError(
-            "analysis filter requires SciPy; install WaveBench with `.[analysis]`"
+            "analysis processing requires SciPy; install WaveBench with `.[analysis]`"
         ) from exc
     missing = sorted(
         name
@@ -77,7 +81,7 @@ def ensure_analysis_pipeline_dependencies(plan: RunPlan) -> None:
     )
     if missing:
         raise ConfigError(
-            "analysis filter requires compatible SciPy signal support "
+            "analysis processing requires compatible SciPy signal support "
             f"({', '.join(missing)}); install WaveBench with `.[analysis]`"
         )
 
@@ -109,6 +113,7 @@ def execute_analysis_pipeline(
     filters: list[dict[str, Any]] = []
     sampling: dict[str, Any] | None = None
     window: dict[str, Any] | None = None
+    psd: dict[str, Any] | None = None
     source: dict[str, Any] = {
         "step": source_step.id,
         "step_index": source_step.index,
@@ -124,7 +129,7 @@ def execute_analysis_pipeline(
             source_record=source_record,
         )
         source.update(source_details)
-        signal: TimeSignal | FrequencySignal = validate_waveform(waveform)
+        signal: TimeSignal | FrequencySignal | PsdSignal = validate_waveform(waveform)
         sampling = _time_sampling(signal)
         stages.append({"stage": "source", "status": "ok", "domain": "time"})
 
@@ -193,14 +198,55 @@ def execute_analysis_pipeline(
                         "sample_rate_hz": signal.sample_rate_hz,
                         "resolution_hz": signal.resolution_hz,
                     })
+                elif op == "psd":
+                    assert isinstance(signal, TimeSignal)
+                    signal = welch_psd(
+                        signal, **{key: value for key, value in operation.items() if key != "op"}
+                    )
+                    rate = 1.0 / signal.sample_interval_s
+                    psd = {
+                        **signal.parameters,
+                        "operation_index": operation_index,
+                        "execution_function": "scipy.signal.welch",
+                        "scipy_version": signal.scipy_version,
+                        "sample_rate_hz": rate,
+                        "window_periodic": True,
+                        "window_power_gain": signal.window_power_gain,
+                        "window_sha256": signal.window_sha256,
+                        "segment_count": signal.segment_count,
+                        "discarded_tail_samples": signal.discarded_tail_samples,
+                        "bin_spacing_hz": rate / operation["nfft"],
+                        "segment_frequency_scale_hz": rate / operation["nperseg"],
+                        "scaling": "density",
+                        "units": "V^2/Hz",
+                        "return_onesided": True,
+                        "normalization": "sample_rate_hz * sum(window ** 2)",
+                    }
+                    stage["psd"] = psd
+                    sampling.update({
+                        "sample_interval_s": signal.sample_interval_s,
+                        "sample_rate_hz": rate,
+                    })
+                    psd_warnings = []
+                    if signal.segment_count == 1:
+                        psd_warnings.append("PSD has only one segment; no segment averaging")
+                    if signal.discarded_tail_samples:
+                        psd_warnings.append(
+                            f"PSD discarded {signal.discarded_tail_samples} trailing samples"
+                        )
+                    if psd_warnings:
+                        stage["warnings"] = psd_warnings
+                        _extend_unique(warnings, psd_warnings)
                 elif op == "measure":
                     if isinstance(signal, TimeSignal):
                         measured = measure_time(signal, operation["metrics"])
                         operation_warnings: list[str] = []
-                    else:
+                    elif isinstance(signal, FrequencySignal):
                         measured, operation_warnings = measure_frequency(
                             signal, operation["metrics"]
                         )
+                    else:
+                        raise DataError("PSD does not support scalar metrics")
                     metrics.update(measured)
                     _extend_unique(warnings, operation_warnings)
                     if operation_warnings:
@@ -273,6 +319,8 @@ def execute_analysis_pipeline(
     }
     if filters:
         manifest["filters"] = filters
+    if psd is not None:
+        manifest["psd"] = psd
     if failed_stage is not None:
         manifest["failed_stage"] = failed_stage
     if failure is not None:
@@ -490,7 +538,7 @@ def _export_signal(
     *,
     run_dir: Path,
     processing_dir: Path,
-    signal: TimeSignal | FrequencySignal,
+    signal: TimeSignal | FrequencySignal | PsdSignal,
     name: str,
     formats: list[str],
 ) -> Iterator[dict[str, Any]]:
@@ -498,6 +546,8 @@ def _export_signal(
     exports_dir.mkdir(parents=True, exist_ok=True)
     if isinstance(signal, TimeSignal):
         columns = ["time_s", "voltage_v"]
+    elif isinstance(signal, PsdSignal):
+        columns = ["frequency_hz", "psd_v2_per_hz"]
     else:
         columns = ["frequency_hz", "real_v", "imaginary_v", "amplitude_v"]
     data = signal.as_array()
@@ -590,7 +640,9 @@ def _time_sampling(signal: TimeSignal) -> dict[str, Any]:
     }
 
 
-def _domain(signal: TimeSignal | FrequencySignal) -> str:
+def _domain(signal: TimeSignal | FrequencySignal | PsdSignal) -> str:
+    if isinstance(signal, PsdSignal):
+        return "psd"
     return "time" if isinstance(signal, TimeSignal) else "frequency"
 
 

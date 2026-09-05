@@ -36,3 +36,13 @@ operations = [
 [steps.expect]
 peak_frequency_hz = { min = 990, max = 1010 }
 thd_ratio = { max = 0.05 }
+
+# Independent density analysis of the same raw capture; no whole-signal window.
+[[steps]]
+id = "density_main"
+kind = "analysis.pipeline"
+source = { step = "capture_main" }
+operations = [
+  { op = "psd", method = "welch", window = "hann", nperseg = 256, noverlap = 128, nfft = 256, detrend = "constant", average = "mean" },
+  { op = "export", name = "density", formats = ["npy", "csv"] },
+]

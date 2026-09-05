@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Any, Iterable, Sequence
 
 import numpy as np
@@ -95,6 +96,100 @@ class FirFilterResult:
     @property
     def sample_rate_hz(self) -> float:
         return 1.0 / self.sample_interval_s
+
+
+@dataclass(frozen=True)
+class PsdSignal:
+    frequency_hz: np.ndarray
+    psd_v2_per_hz: np.ndarray
+    sample_interval_s: float
+    samples: int
+    parameters: dict[str, Any]
+    segment_count: int
+    discarded_tail_samples: int
+    window_power_gain: float
+    window_sha256: str
+    scipy_version: str
+
+    def as_array(self) -> np.ndarray:
+        return np.column_stack((self.frequency_hz, self.psd_v2_per_hz))
+
+
+def normalize_psd_parameters(
+    *, method: str, window: str, nperseg: int, noverlap: int, nfft: int,
+    detrend: str, average: str,
+) -> dict[str, Any]:
+    parameters: dict[str, Any] = {}
+    for name, value, allowed in (
+        ("method", method, {"welch"}),
+        ("window", window, {"hann", "hamming", "blackman"}),
+        ("detrend", detrend, {"none", "constant", "linear"}),
+        ("average", average, {"mean", "median"}),
+    ):
+        if not isinstance(value, str) or value.strip().lower() not in allowed:
+            raise DataError(f"analysis PSD {name} must be one of {', '.join(sorted(allowed))}")
+        parameters[name] = value.strip().lower()
+    for name, value in (("nperseg", nperseg), ("noverlap", noverlap), ("nfft", nfft)):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise DataError(f"analysis PSD {name} must be an integer")
+        parameters[name] = value
+    if nperseg < 4:
+        raise DataError("analysis PSD nperseg must be >= 4")
+    if not 0 <= noverlap < nperseg:
+        raise DataError("analysis PSD noverlap must satisfy 0 <= noverlap < nperseg")
+    if nfft < nperseg:
+        raise DataError("analysis PSD nfft must be >= nperseg")
+    return parameters
+
+
+def welch_psd(
+    signal: TimeSignal, *, method: str, window: str, nperseg: int,
+    noverlap: int, nfft: int, detrend: str, average: str,
+) -> PsdSignal:
+    parameters = normalize_psd_parameters(
+        method=method, window=window, nperseg=nperseg, noverlap=noverlap,
+        nfft=nfft, detrend=detrend, average=average,
+    )
+    if signal.window_name is not None or signal.coherent_gain != 1.0:
+        raise DataError("analysis PSD must not follow a whole-signal window")
+    samples = int(signal.voltage_v.size)
+    if samples < nperseg:
+        raise DataError("analysis PSD requires at least nperseg samples; segment length is not reduced")
+    sample_interval = _uniform_sample_interval(signal, "analysis PSD")
+    sample_rate = 1.0 / sample_interval
+    if not np.isfinite(sample_rate):
+        raise DataError("analysis PSD requires a finite sample rate")
+    try:
+        from scipy import __version__ as scipy_version
+        from scipy import signal as scipy_signal
+    except ImportError as exc:
+        raise DataError("analysis PSD requires SciPy; install WaveBench with `.[analysis]`") from exc
+    weights = scipy_signal.get_window(parameters["window"], nperseg, fftbins=True)
+    try:
+        frequencies, density = scipy_signal.welch(
+            signal.voltage_v, fs=sample_rate, window=weights, nperseg=nperseg,
+            noverlap=noverlap, nfft=nfft,
+            detrend=False if parameters["detrend"] == "none" else parameters["detrend"],
+            average=parameters["average"], scaling="density", return_onesided=True, axis=-1,
+        )
+    except (ValueError, FloatingPointError, OverflowError) as exc:
+        raise DataError(f"analysis PSD failed: {exc}") from exc
+    if (
+        frequencies.shape != (nfft // 2 + 1,) or density.shape != frequencies.shape
+        or not np.all(np.isfinite(frequencies)) or not np.all(np.isfinite(density))
+        or np.any(density < 0)
+    ):
+        raise DataError("analysis PSD must produce finite nonnegative one-sided density")
+    hop = nperseg - noverlap
+    return PsdSignal(
+        frequency_hz=frequencies, psd_v2_per_hz=density,
+        sample_interval_s=sample_interval, samples=samples, parameters=parameters,
+        segment_count=1 + (samples - nperseg) // hop,
+        discarded_tail_samples=(samples - nperseg) % hop,
+        window_power_gain=float(np.mean(weights ** 2)),
+        window_sha256=sha256(np.asarray(weights, dtype="<f8").tobytes()).hexdigest(),
+        scipy_version=scipy_version,
+    )
 
 
 @dataclass(frozen=True)

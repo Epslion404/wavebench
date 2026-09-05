@@ -18,8 +18,9 @@ from wavebench.data.signal_pipeline import (
     ANALYSIS_IIR_MAX_ORDER,
     ANALYSIS_IIR_MAX_RIPPLE_DB,
     ANALYSIS_TIME_METRICS,
+    normalize_psd_parameters,
 )
-from wavebench.errors import ConfigError
+from wavebench.errors import ConfigError, DataError
 from wavebench.services.frequency_response import FIT_METHODS
 from wavebench.services.frequency_response_adaptive import normalize_frequency_response_adaptive
 from wavebench.services.frequency_response_baseline import normalize_frequency_response_baseline
@@ -458,6 +459,13 @@ def format_run_plan_schema() -> str:
         "analysis.pipeline metrics:",
         "  Time domain: voltage_min_v, voltage_max_v, voltage_mean_v, voltage_rms_v, voltage_vpp_v.",
         "  Frequency domain: peak_frequency_hz, peak_amplitude_v, noise_floor_v, thd_ratio, and harmonic_2 through harmonic_5 frequency/amplitude fields.",
+        "  PSD domain: export only; no scalar metrics.",
+        "",
+        "analysis.pipeline PSD operation:",
+        "  psd requires method=welch, window=hann|hamming|blackman, nperseg>=4, 0<=noverlap<nperseg, nfft>=nperseg, detrend=none|constant|linear, average=mean|median.",
+        "  All parameters are explicit; lengths are integers. Segment windows are periodic.",
+        "  Requires time data before window or fft. Only export may follow psd; at least one PSD export is required.",
+        "  Requires optional SciPy. Exports frequency_hz,psd_v2_per_hz with one-sided density scaling.",
     ])
     return "\n".join(lines)
 
@@ -1294,6 +1302,7 @@ def _normalize_analysis_pipeline_fields(prefix: str, fields: dict[str, Any]) -> 
         },
         "window": {"op", "name"},
         "fft": {"op"},
+        "psd": {"op", "method", "window", "nperseg", "noverlap", "nfft", "detrend", "average"},
         "measure": {"op", "metrics"},
         "export": {"op", "name", "formats"},
     }
@@ -1301,6 +1310,7 @@ def _normalize_analysis_pipeline_fields(prefix: str, fields: dict[str, Any]) -> 
         "detrend": {"method"},
         "filter": {"family", "response", "cutoff_hz", "mode"},
         "window": {"name"},
+        "psd": {"method", "window", "nperseg", "noverlap", "nfft", "detrend", "average"},
         "measure": {"metrics"},
         "export": {"name", "formats"},
     }
@@ -1326,6 +1336,11 @@ def _normalize_analysis_pipeline_fields(prefix: str, fields: dict[str, Any]) -> 
             raise ConfigError(f"{operation_prefix} {op} missing required field {names}")
 
         operation: dict[str, Any] = {"op": op}
+        if domain == "psd" and op != "export":
+            raise ConfigError(f"{operation_prefix}: only export is supported after psd")
+        if op == "psd":
+            if domain != "time" or "window" in transforms:
+                raise ConfigError(f"{operation_prefix}: psd requires time data before window or fft")
         if op in {"remove_dc", "detrend", "window", "fft"}:
             if op in transforms:
                 raise ConfigError(f"{prefix} operation {op!r} may appear at most once")
@@ -1487,6 +1502,14 @@ def _normalize_analysis_pipeline_fields(prefix: str, fields: dict[str, Any]) -> 
             operation["name"] = name.lower()
         elif op == "fft":
             domain = "frequency"
+        elif op == "psd":
+            try:
+                operation.update(normalize_psd_parameters(
+                    **{key: value for key, value in raw_operation.items() if key != "op"}
+                ))
+            except DataError as exc:
+                raise ConfigError(f"{operation_prefix}: {exc}") from exc
+            domain = "psd"
         elif op == "measure":
             raw_metrics = raw_operation["metrics"]
             if not isinstance(raw_metrics, list) or not raw_metrics:
@@ -1542,6 +1565,8 @@ def _normalize_analysis_pipeline_fields(prefix: str, fields: dict[str, Any]) -> 
 
     if not has_result:
         raise ConfigError(f"{prefix}.operations requires at least one measure or export operation")
+    if domain == "psd" and normalized[-1]["op"] != "export":
+        raise ConfigError(f"{prefix}.operations requires an export after psd")
     fields["operations"] = normalized
 
     if "expect" in fields:

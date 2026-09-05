@@ -73,6 +73,7 @@ thd_ratio = { max = 0.05 }
 | `filter` | FIR 或 IIR 的判别式设计参数 | 时域 → 时域 |
 | `window` | `name = "hann|hamming|blackman"` | 时域 → 时域 |
 | `fft` | 无 | 时域 → 频域 |
+| `psd` | Welch 分段参数，见下文 | 时域 → PSD |
 | `measure` | 非空 `metrics` 数组 | 观察当前域，不改变数据 |
 | `export` | 安全的 `name`；`formats` 为 `npy`、`csv` 的非空子集 | 导出当前域，不改变数据 |
 
@@ -97,7 +98,7 @@ FIR 需要可选分析依赖：
 python -m pip install -e ".[analysis]"
 ```
 
-Plan 包含 FIR 或 IIR 算子时，`run check` 检查 SciPy；缺少依赖时会在租约、session 和仪器 I/O 之前失败。没有 filter 的 NumPy 流水线不需要 SciPy。
+Plan 包含 FIR、IIR 或 PSD 算子时，`run check` 检查 SciPy；缺少依赖时会在租约、session 和仪器 I/O 之前失败。仅使用 NumPy 算子的流水线不需要 SciPy。
 
 ### IIR 滤波
 
@@ -124,7 +125,32 @@ IIR 继续使用同一个 `filter` 算子。`family = "iir"` 时必须声明 `de
 
 `causal` 使用 `sosfilt` 和全零初始状态。`zero_phase` 使用 `sosfiltfilt` 与固定奇延拓；padding 长度根据实际 SOS 明确计算并写入 manifest，输入点数必须大于该长度。零相位的有效幅频响应仍是单程幅频响应的平方。两种模式都保留原时间轴和样本数。
 
-FIR 和 IIR 共用 `.[analysis]` 可选依赖。`run check` 根据 Plan 实际选择的 family、design 和 mode 检查所需 SciPy 函数；没有 filter 的流水线不触发该检查。
+FIR、IIR 和 PSD 共用 `.[analysis]` 可选依赖。`run check` 根据 Plan 实际选择的算子参数检查所需 SciPy 函数。
+
+### Welch 功率谱密度
+
+PSD 算子将时域数据转换为单边功率谱密度，单位为 `V²/Hz`。全部参数必须显式声明：
+
+```toml
+{ op = "psd", method = "welch", window = "hann", nperseg = 256, noverlap = 128, nfft = 256, detrend = "none", average = "mean" }
+{ op = "export", name = "density", formats = ["npy", "csv"] }
+```
+
+| 参数 | 合同 |
+| --- | --- |
+| `method` | 固定为 `welch` |
+| `window` | `hann`、`hamming` 或 `blackman`，每段使用周期窗 |
+| `nperseg` | 每段样本数，整数且至少为 4 |
+| `noverlap` | 相邻段重叠样本数，整数且满足 `0 <= noverlap < nperseg` |
+| `nfft` | 每段 FFT 长度，整数且不小于 `nperseg`；较大值只做补零 |
+| `detrend` | `none`、`constant` 或 `linear`，在每段加窗前执行 |
+| `average` | `mean` 或经过偏差修正的 `median` |
+
+PSD 可以跟在去直流、去趋势或 FIR／IIR 之后，但不能跟在整段 `window` 或 `fft` 之后。每条流水线至多有一个 PSD；PSD 之后只允许 `export`，且至少导出一次。需要同时生成 FFT 和 PSD 时，使用两个分析 step 引用同一个 capture。PSD 之前可以测量时域指标，PSD 本身暂不提供标量指标，不能复用 FFT 的峰值幅度、THD 或噪声底。
+
+运行时按实际时间轴检查等间隔采样，容差为 `rtol=1e-6, atol=0`。样本数小于 `nperseg` 时失败，不自动缩短段长。只处理完整段；不足一段的尾点不补齐，并在 manifest 中记录数量。仅有一段时仍可导出，同时记录没有跨段平均的警告。
+
+数值实现使用 [SciPy Welch](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.welch.html)，固定 `scaling="density"` 和单边输出。每段按 `sample_rate_hz × sum(window²)` 归一化，仅将非 DC、非偶数点 Nyquist 的 bin 功率乘 2。`detrend="none"` 不隐式去直流。频率 bin 间距为 `sample_rate_hz / nfft`，补零不会改善由段长与窗决定的分辨能力。
 
 时域指标为 `voltage_min_v`、`voltage_max_v`、`voltage_mean_v`、`voltage_rms_v` 和 `voltage_vpp_v`。频域指标为 `peak_frequency_hz`、`peak_amplitude_v`、`noise_floor_v`、`thd_ratio`，以及 `harmonic_2`～`harmonic_5` 的 `frequency_hz` 和 `amplitude_v` 字段。`[steps.expect]` 只能引用流水线中已显式选择的测量指标。
 
