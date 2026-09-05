@@ -126,6 +126,44 @@ operations = [
         }
 
 
+def test_analysis_pipeline_intent_carries_normalized_iir_design() -> None:
+    with TemporaryDirectory() as tmp:
+        plan = load_run_plan(
+            write_plan(
+                tmp,
+                """
+[[steps]]
+id = "capture_main"
+kind = "scope.capture"
+save_npy = true
+
+[[steps]]
+kind = "analysis.pipeline"
+source = { step = "capture_main" }
+operations = [
+  { op = "filter", family = "IIR", design = "ELLIPTIC", response = "BANDSTOP", cutoff_hz = [49, 51], order = 6, ripple_db = 1, attenuation_db = 60, mode = "ZERO_PHASE" },
+  { op = "export", name = "filtered", formats = ["npy"] },
+]
+""",
+            )
+        )
+
+        intent = build_execution_intent(plan, make_config(tmp))
+
+        iir = intent.operations[1]["parameters"]["operations"][0]
+        assert iir == {
+            "op": "filter",
+            "family": "iir",
+            "response": "bandstop",
+            "cutoff_hz": [49.0, 51.0],
+            "mode": "zero_phase",
+            "design": "elliptic",
+            "order": 6,
+            "ripple_db": 1.0,
+            "attenuation_db": 60.0,
+        }
+
+
 def test_step_id_changes_plan_and_intent_digest_without_changing_legacy_shape() -> None:
     with TemporaryDirectory() as tmp:
         legacy = _sleep_plan(tmp)

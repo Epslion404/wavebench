@@ -28,6 +28,15 @@ ANALYSIS_FREQUENCY_METRICS = frozenset({
 })
 ANALYSIS_FIR_RESPONSES = frozenset({"lowpass", "highpass", "bandpass", "bandstop"})
 ANALYSIS_FIR_MODES = frozenset({"causal", "zero_phase"})
+ANALYSIS_IIR_DESIGNS = frozenset({
+    "butterworth",
+    "chebyshev1",
+    "chebyshev2",
+    "elliptic",
+})
+ANALYSIS_IIR_MAX_ORDER = 12
+ANALYSIS_IIR_MAX_RIPPLE_DB = 20.0
+ANALYSIS_IIR_MAX_ATTENUATION_DB = 200.0
 SIGNIFICANT_PEAK_V = 1e-12
 
 
@@ -82,6 +91,20 @@ class FirFilterResult:
     taps: np.ndarray
     sample_interval_s: float
     scipy_version: str
+
+    @property
+    def sample_rate_hz(self) -> float:
+        return 1.0 / self.sample_interval_s
+
+
+@dataclass(frozen=True)
+class IirFilterResult:
+    signal: TimeSignal
+    sos: np.ndarray
+    sample_interval_s: float
+    scipy_version: str
+    max_pole_magnitude: float
+    zero_phase_padlen: int
 
     @property
     def sample_rate_hz(self) -> float:
@@ -162,7 +185,7 @@ def filter_fir(
     if isinstance(numtaps, bool) or not isinstance(numtaps, int) or numtaps < 3 or numtaps % 2 == 0:
         raise DataError("analysis FIR numtaps must be an odd integer >= 3")
 
-    cutoff = _fir_cutoff(response, cutoff_hz)
+    cutoff = _filter_cutoff(response, cutoff_hz, family="FIR")
     sample_interval = _uniform_sample_interval(signal, "analysis FIR filter")
     sample_rate = 1.0 / sample_interval
     nyquist = sample_rate / 2.0
@@ -182,7 +205,7 @@ def filter_fir(
 
     try:
         from scipy import __version__ as scipy_version
-        from scipy.signal import filtfilt, firwin, lfilter
+        from scipy import signal as scipy_signal
     except ImportError as exc:  # pragma: no cover - RunService checks this before execution
         raise DataError(
             "analysis FIR filter requires SciPy; install WaveBench with `.[analysis]`"
@@ -190,7 +213,7 @@ def filter_fir(
 
     try:
         taps = np.asarray(
-            firwin(
+            scipy_signal.firwin(
                 numtaps,
                 cutoff,
                 window="hamming",
@@ -201,9 +224,9 @@ def filter_fir(
             dtype=np.float64,
         )
         if mode == "causal":
-            voltage = lfilter(taps, [1.0], signal.voltage_v, axis=-1)
+            voltage = scipy_signal.lfilter(taps, [1.0], signal.voltage_v, axis=-1)
         else:
-            voltage = filtfilt(
+            voltage = scipy_signal.filtfilt(
                 taps,
                 [1.0],
                 signal.voltage_v,
@@ -220,6 +243,111 @@ def filter_fir(
         taps=taps,
         sample_interval_s=sample_interval,
         scipy_version=scipy_version,
+    )
+
+
+def filter_iir(
+    signal: TimeSignal,
+    *,
+    design: str,
+    response: str,
+    cutoff_hz: float | Sequence[float],
+    order: int,
+    mode: str,
+    ripple_db: float | None = None,
+    attenuation_db: float | None = None,
+) -> IirFilterResult:
+    if design not in ANALYSIS_IIR_DESIGNS:
+        raise DataError(
+            "analysis IIR design must be butterworth, chebyshev1, chebyshev2, or elliptic"
+        )
+    if response not in ANALYSIS_FIR_RESPONSES:
+        raise DataError("analysis IIR response must be lowpass, highpass, bandpass, or bandstop")
+    if mode not in ANALYSIS_FIR_MODES:
+        raise DataError("analysis IIR mode must be causal or zero_phase")
+    if (
+        isinstance(order, bool)
+        or not isinstance(order, int)
+        or not 1 <= order <= ANALYSIS_IIR_MAX_ORDER
+    ):
+        raise DataError(f"analysis IIR order must be an integer from 1 to {ANALYSIS_IIR_MAX_ORDER}")
+    ripple, attenuation = _iir_design_parameters(
+        design,
+        ripple_db=ripple_db,
+        attenuation_db=attenuation_db,
+    )
+
+    cutoff = _filter_cutoff(response, cutoff_hz, family="IIR")
+    sample_interval = _uniform_sample_interval(signal, "analysis IIR filter")
+    sample_rate = 1.0 / sample_interval
+    nyquist = sample_rate / 2.0
+    cutoff_values = [cutoff] if isinstance(cutoff, float) else cutoff
+    if any(value >= nyquist for value in cutoff_values):
+        raise DataError(
+            f"analysis IIR cutoff_hz must be below Nyquist frequency {nyquist:.17g} Hz"
+        )
+
+    try:
+        from scipy import __version__ as scipy_version
+        from scipy import signal as scipy_signal
+    except ImportError as exc:  # pragma: no cover - RunService checks this before execution
+        raise DataError(
+            "analysis IIR filter requires SciPy; install WaveBench with `.[analysis]`"
+        ) from exc
+
+    design_kwargs = {
+        "btype": response,
+        "output": "sos",
+        "fs": sample_rate,
+    }
+    try:
+        if design == "butterworth":
+            raw_sos = scipy_signal.butter(order, cutoff, **design_kwargs)
+        elif design == "chebyshev1":
+            raw_sos = scipy_signal.cheby1(order, ripple, cutoff, **design_kwargs)
+        elif design == "chebyshev2":
+            raw_sos = scipy_signal.cheby2(order, attenuation, cutoff, **design_kwargs)
+        else:
+            raw_sos = scipy_signal.ellip(order, ripple, attenuation, cutoff, **design_kwargs)
+        sos = _validated_sos(raw_sos)
+        _, poles, _ = scipy_signal.sos2zpk(sos)
+    except (FloatingPointError, OverflowError, ValueError, ZeroDivisionError) as exc:
+        raise DataError(f"analysis IIR filter design failed: {exc}") from exc
+
+    if not np.all(np.isfinite(poles)):
+        raise DataError("analysis IIR filter design produced non-finite poles")
+    max_pole_magnitude = float(np.max(np.abs(poles)))
+    if not np.isfinite(max_pole_magnitude) or max_pole_magnitude >= 1.0:
+        raise DataError("analysis IIR filter design is not stable")
+
+    padlen = _sos_zero_phase_padlen(sos)
+    if mode == "zero_phase" and signal.voltage_v.size <= padlen:
+        raise DataError(
+            "analysis zero-phase IIR requires at least "
+            f"{padlen + 1} samples for {sos.shape[0]} SOS sections"
+        )
+
+    try:
+        if mode == "causal":
+            voltage = scipy_signal.sosfilt(sos, signal.voltage_v, axis=-1, zi=None)
+        else:
+            voltage = scipy_signal.sosfiltfilt(
+                sos,
+                signal.voltage_v,
+                axis=-1,
+                padtype="odd",
+                padlen=padlen,
+            )
+    except (FloatingPointError, OverflowError, ValueError) as exc:
+        raise DataError(f"analysis IIR filter execution failed: {exc}") from exc
+
+    return IirFilterResult(
+        signal=_replace_voltage(signal, np.asarray(voltage, dtype=np.float64)),
+        sos=sos,
+        sample_interval_s=sample_interval,
+        scipy_version=scipy_version,
+        max_pole_magnitude=max_pole_magnitude,
+        zero_phase_padlen=padlen,
     )
 
 
@@ -347,24 +475,93 @@ def _replace_voltage(signal: TimeSignal, voltage: np.ndarray) -> TimeSignal:
     )
 
 
-def _fir_cutoff(
-    response: str, cutoff_hz: float | Sequence[float]
+def _filter_cutoff(
+    response: str,
+    cutoff_hz: float | Sequence[float],
+    *,
+    family: str,
 ) -> float | list[float]:
     if response in {"lowpass", "highpass"}:
         if isinstance(cutoff_hz, Sequence) and not isinstance(cutoff_hz, (str, bytes)):
-            raise DataError(f"analysis FIR {response} cutoff_hz must be a positive number")
-        return _positive_finite(cutoff_hz, "analysis FIR cutoff_hz")
+            raise DataError(f"analysis {family} {response} cutoff_hz must be a positive number")
+        return _positive_finite(cutoff_hz, f"analysis {family} cutoff_hz")
 
     if (
         not isinstance(cutoff_hz, Sequence)
         or isinstance(cutoff_hz, (str, bytes))
         or len(cutoff_hz) != 2
     ):
-        raise DataError(f"analysis FIR {response} cutoff_hz must contain two frequencies")
-    values = [_positive_finite(value, "analysis FIR cutoff_hz") for value in cutoff_hz]
+        raise DataError(f"analysis {family} {response} cutoff_hz must contain two frequencies")
+    values = [_positive_finite(value, f"analysis {family} cutoff_hz") for value in cutoff_hz]
     if values[1] <= values[0]:
-        raise DataError("analysis FIR cutoff_hz must be strictly increasing")
+        raise DataError(f"analysis {family} cutoff_hz must be strictly increasing")
     return values
+
+
+def _iir_design_parameters(
+    design: str,
+    *,
+    ripple_db: float | None,
+    attenuation_db: float | None,
+) -> tuple[float | None, float | None]:
+    needs_ripple = design in {"chebyshev1", "elliptic"}
+    needs_attenuation = design in {"chebyshev2", "elliptic"}
+    if needs_ripple != (ripple_db is not None):
+        requirement = "requires" if needs_ripple else "does not accept"
+        raise DataError(f"analysis IIR {design} {requirement} ripple_db")
+    if needs_attenuation != (attenuation_db is not None):
+        requirement = "requires" if needs_attenuation else "does not accept"
+        raise DataError(f"analysis IIR {design} {requirement} attenuation_db")
+
+    ripple = (
+        _bounded_positive_finite(
+            ripple_db,
+            "analysis IIR ripple_db",
+            maximum=ANALYSIS_IIR_MAX_RIPPLE_DB,
+        )
+        if ripple_db is not None
+        else None
+    )
+    attenuation = (
+        _bounded_positive_finite(
+            attenuation_db,
+            "analysis IIR attenuation_db",
+            maximum=ANALYSIS_IIR_MAX_ATTENUATION_DB,
+        )
+        if attenuation_db is not None
+        else None
+    )
+    if design == "elliptic" and ripple is not None and attenuation is not None:
+        if ripple >= attenuation:
+            raise DataError("analysis IIR elliptic ripple_db must be less than attenuation_db")
+    return ripple, attenuation
+
+
+def _bounded_positive_finite(value: Any, name: str, *, maximum: float) -> float:
+    result = _positive_finite(value, name)
+    if result > maximum:
+        raise DataError(f"{name} must be <= {maximum:g}")
+    return result
+
+
+def _validated_sos(value: Any) -> np.ndarray:
+    try:
+        sos = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise DataError("analysis IIR filter design must produce numeric SOS coefficients") from exc
+    if sos.ndim != 2 or sos.shape[0] < 1 or sos.shape[1] != 6:
+        raise DataError("analysis IIR filter design must produce an Nx6 SOS array")
+    if not np.all(np.isfinite(sos)):
+        raise DataError("analysis IIR filter design produced non-finite SOS coefficients")
+    if not np.array_equal(sos[:, 3], np.ones(sos.shape[0])):
+        raise DataError("analysis IIR filter SOS denominators must have a0 = 1")
+    return sos
+
+
+def _sos_zero_phase_padlen(sos: np.ndarray) -> int:
+    zeros_at_origin = int(np.count_nonzero(sos[:, 2] == 0.0))
+    poles_at_origin = int(np.count_nonzero(sos[:, 5] == 0.0))
+    return 3 * (2 * sos.shape[0] + 1 - min(zeros_at_origin, poles_at_origin))
 
 
 def _positive_finite(value: Any, name: str) -> float:

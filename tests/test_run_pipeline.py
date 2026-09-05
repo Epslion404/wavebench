@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -207,6 +208,123 @@ class AnalysisPipelineArtifactTests(unittest.TestCase):
             self.assertEqual(sha256(source_npy.read_bytes()).hexdigest(), source_before)
 
     @unittest.skipUnless(HAS_SCIPY, "SciPy analysis dependency is unavailable")
+    def test_mixed_fir_iir_filters_write_stable_sos_metadata(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "runs" / "run"
+            run_dir.mkdir(parents=True)
+            source_step, source_record, source_npy = self.source(root, self.waveform())
+            source_before = sha256(source_npy.read_bytes()).hexdigest()
+            step = self.pipeline([
+                {
+                    "op": "filter",
+                    "family": "fir",
+                    "response": "lowpass",
+                    "cutoff_hz": 2000.0,
+                    "numtaps": 31,
+                    "mode": "causal",
+                },
+                {
+                    "op": "filter",
+                    "family": "iir",
+                    "design": "elliptic",
+                    "response": "bandstop",
+                    "cutoff_hz": [49.0, 51.0],
+                    "order": 4,
+                    "ripple_db": 1.0,
+                    "attenuation_db": 60.0,
+                    "mode": "zero_phase",
+                },
+                {"op": "export", "name": "filtered", "formats": ["npy"]},
+            ])
+
+            artifact = execute_analysis_pipeline(
+                run_dir=run_dir,
+                step=step,
+                source_step=source_step,
+                source_record=source_record,
+            )
+
+            manifest = json.loads(
+                (run_dir / artifact["analysis_pipeline"]["manifest"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            filters = manifest["filters"]
+            iir = filters[1]
+            self.assertEqual(artifact["analysis_pipeline"]["status"], "ok")
+            self.assertEqual([item["family"] for item in filters], ["fir", "iir"])
+            self.assertEqual(iir["operation_index"], 1)
+            self.assertEqual(iir["design"], "elliptic")
+            self.assertEqual(iir["response"], "bandstop")
+            self.assertEqual(iir["order"], 4)
+            self.assertEqual(iir["digital_filter_order"], 8)
+            self.assertEqual(iir["design_function"], "scipy.signal.ellip")
+            self.assertEqual(iir["design_output"], "sos")
+            self.assertEqual(iir["critical_frequency_semantics"], "single_pass_passband_ripple_edge")
+            self.assertEqual(iir["sos_shape"], [iir["sections"], 6])
+            self.assertEqual(len(iir["sos_sha256"]), 64)
+            self.assertTrue(iir["stable"])
+            self.assertLess(iir["max_pole_magnitude"], 1.0)
+            self.assertEqual(iir["ripple_db"], 1.0)
+            self.assertEqual(iir["attenuation_db"], 60.0)
+            self.assertEqual(iir["execution_function"], "scipy.signal.sosfiltfilt")
+            self.assertEqual(iir["effective_magnitude_response"], "single_pass_squared")
+            self.assertEqual(iir["boundary"], "odd_extension")
+            self.assertGreater(iir["padlen"], 0)
+            self.assertEqual(manifest["stages"][2]["filter"], iir)
+            self.assertEqual(sha256(source_npy.read_bytes()).hexdigest(), source_before)
+
+    @unittest.skipUnless(HAS_SCIPY, "SciPy analysis dependency is unavailable")
+    def test_completed_iir_metadata_survives_later_filter_failure(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "runs" / "run"
+            run_dir.mkdir(parents=True)
+            source_step, source_record, _ = self.source(root, self.waveform())
+            step = self.pipeline([
+                {
+                    "op": "filter",
+                    "family": "iir",
+                    "design": "butterworth",
+                    "response": "lowpass",
+                    "cutoff_hz": 1000.0,
+                    "order": 4,
+                    "mode": "causal",
+                },
+                {
+                    "op": "filter",
+                    "family": "iir",
+                    "design": "butterworth",
+                    "response": "lowpass",
+                    "cutoff_hz": 5000.0,
+                    "order": 4,
+                    "mode": "causal",
+                },
+                {"op": "export", "name": "filtered", "formats": ["npy"]},
+            ])
+
+            artifact = execute_analysis_pipeline(
+                run_dir=run_dir,
+                step=step,
+                source_step=source_step,
+                source_record=source_record,
+            )
+
+            manifest = json.loads(
+                (run_dir / artifact["analysis_pipeline"]["manifest"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(artifact["analysis_pipeline"]["status"], "failed")
+            self.assertEqual(artifact["analysis_pipeline"]["failed_stage"], "operations[1]")
+            self.assertTrue(manifest["partial"])
+            self.assertEqual(len(manifest["filters"]), 1)
+            self.assertEqual(manifest["filters"][0]["family"], "iir")
+            self.assertEqual(manifest["stages"][2]["status"], "failed")
+            self.assertIn("below Nyquist", manifest["error"]["message"])
+
+    @unittest.skipUnless(HAS_SCIPY, "SciPy analysis dependency is unavailable")
     def test_completed_filter_metadata_survives_later_nyquist_failure(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -253,7 +371,7 @@ class AnalysisPipelineArtifactTests(unittest.TestCase):
             self.assertEqual(manifest["stages"][3]["status"], "skipped")
             self.assertIn("below Nyquist", manifest["error"]["message"])
 
-    def test_fir_dependency_check_is_conditional_and_actionable(self) -> None:
+    def test_filter_dependency_check_is_conditional_and_actionable(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             no_filter_path = root / "no_filter.toml"
@@ -289,6 +407,24 @@ operations = [
 """,
                 encoding="utf-8",
             )
+            iir_path = root / "iir.toml"
+            iir_path.write_text(
+                """
+[[steps]]
+id = "capture_main"
+kind = "scope.capture"
+save_npy = true
+
+[[steps]]
+kind = "analysis.pipeline"
+source = { step = "capture_main" }
+operations = [
+  { op = "filter", family = "iir", design = "butterworth", response = "lowpass", cutoff_hz = 1000, order = 4, mode = "zero_phase" },
+  { op = "export", name = "filtered", formats = ["npy"] },
+]
+""",
+                encoding="utf-8",
+            )
 
             with patch("wavebench.services.run_pipeline.import_module") as load_dependency:
                 ensure_analysis_pipeline_dependencies(load_run_plan(no_filter_path))
@@ -300,6 +436,25 @@ operations = [
             ):
                 with self.assertRaisesRegex(ConfigError, r"\.\[analysis\]"):
                     ensure_analysis_pipeline_dependencies(load_run_plan(fir_path))
+
+            available = SimpleNamespace(
+                butter=lambda: None,
+                sos2zpk=lambda: None,
+                sosfiltfilt=lambda: None,
+            )
+            with patch(
+                "wavebench.services.run_pipeline.import_module",
+                return_value=available,
+            ):
+                ensure_analysis_pipeline_dependencies(load_run_plan(iir_path))
+
+            del available.sosfiltfilt
+            with patch(
+                "wavebench.services.run_pipeline.import_module",
+                return_value=available,
+            ):
+                with self.assertRaisesRegex(ConfigError, "sosfiltfilt"):
+                    ensure_analysis_pipeline_dependencies(load_run_plan(iir_path))
 
     def test_source_expectation_failure_still_allows_complete_npy(self) -> None:
         with TemporaryDirectory() as tmp:

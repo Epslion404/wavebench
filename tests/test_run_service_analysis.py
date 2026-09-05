@@ -299,7 +299,7 @@ duration_s = 0.001
         assert "id" not in run["steps"][0]
 
 
-def test_missing_fir_dependency_is_rejected_before_instrument_lifecycle() -> None:
+def test_missing_filter_dependency_is_rejected_before_instrument_lifecycle() -> None:
     with TemporaryDirectory() as tmp:
         plan = load_run_plan(
             write_plan(
@@ -314,7 +314,7 @@ save_npy = true
 kind = "analysis.pipeline"
 source = { step = "capture_main" }
 operations = [
-  { op = "filter", family = "fir", response = "lowpass", cutoff_hz = 1000, numtaps = 31, mode = "causal" },
+  { op = "filter", family = "iir", design = "butterworth", response = "lowpass", cutoff_hz = 1000, order = 4, mode = "causal" },
   { op = "export", name = "filtered", formats = ["npy"] },
 ]
 """,
@@ -325,7 +325,7 @@ operations = [
         with patch(
             "wavebench.services.run_service.ensure_analysis_pipeline_dependencies",
             side_effect=ConfigError(
-                "analysis FIR filter requires SciPy; install WaveBench with `.[analysis]`"
+                "analysis filter requires SciPy; install WaveBench with `.[analysis]`"
             ),
         ), patch.object(service, "_run_instrument_services") as open_services:
             try:
@@ -333,7 +333,7 @@ operations = [
             except ConfigError as exc:
                 assert ".[analysis]" in str(exc)
             else:  # pragma: no cover - assertion helper without pytest dependency
-                raise AssertionError("missing FIR dependency should be rejected")
+                raise AssertionError("missing filter dependency should be rejected")
 
         open_services.assert_not_called()
         assert not (Path(tmp) / "data" / "runs").exists()

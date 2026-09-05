@@ -10,6 +10,7 @@ from wavebench.data.signal_pipeline import (
     detrend_linear,
     fft_signal,
     filter_fir,
+    filter_iir,
     measure_frequency,
     measure_time,
     remove_dc,
@@ -242,6 +243,268 @@ class SignalPipelineTests(unittest.TestCase):
                 numtaps=31,
                 mode="causal",
             )
+
+    @unittest.skipUnless(HAS_SCIPY, "SciPy analysis dependency is unavailable")
+    def test_causal_iir_designs_match_direct_sos_execution(self) -> None:
+        from scipy import signal as scipy_signal
+
+        sample_rate_hz = 10_000.0
+        time_signal = validate_waveform(self.waveform(2000, sample_rate_hz))
+        cases = {
+            "butterworth": (scipy_signal.butter, {}, (4, 1000.0)),
+            "chebyshev1": (
+                scipy_signal.cheby1,
+                {"ripple_db": 1.0},
+                (4, 1.0, 1000.0),
+            ),
+            "chebyshev2": (
+                scipy_signal.cheby2,
+                {"attenuation_db": 40.0},
+                (4, 40.0, 1000.0),
+            ),
+            "elliptic": (
+                scipy_signal.ellip,
+                {"ripple_db": 1.0, "attenuation_db": 40.0},
+                (4, 1.0, 40.0, 1000.0),
+            ),
+        }
+
+        for design, (factory, request_parameters, scipy_args) in cases.items():
+            with self.subTest(design=design):
+                result = filter_iir(
+                    time_signal,
+                    design=design,
+                    response="lowpass",
+                    cutoff_hz=1000.0,
+                    order=4,
+                    mode="causal",
+                    **request_parameters,
+                )
+                expected_sos = factory(
+                    *scipy_args,
+                    btype="lowpass",
+                    output="sos",
+                    fs=result.sample_rate_hz,
+                )
+                expected_voltage = scipy_signal.sosfilt(
+                    expected_sos,
+                    time_signal.voltage_v,
+                    axis=-1,
+                    zi=None,
+                )
+
+                np.testing.assert_array_equal(result.signal.time_s, time_signal.time_s)
+                np.testing.assert_allclose(result.sos, expected_sos, rtol=0, atol=0)
+                np.testing.assert_allclose(
+                    result.signal.voltage_v,
+                    expected_voltage,
+                    rtol=0,
+                    atol=0,
+                )
+                self.assertTrue(0.0 < result.max_pole_magnitude < 1.0)
+                self.assertTrue(result.scipy_version)
+
+    @unittest.skipUnless(HAS_SCIPY, "SciPy analysis dependency is unavailable")
+    def test_zero_phase_iir_fixes_padding_and_minimum_samples(self) -> None:
+        from scipy import signal as scipy_signal
+
+        sample_rate_hz = 1000.0
+        sos = scipy_signal.butter(
+            3,
+            100.0,
+            btype="lowpass",
+            output="sos",
+            fs=sample_rate_hz,
+        )
+        padlen = 3 * (
+            2 * len(sos)
+            + 1
+            - min(np.count_nonzero(sos[:, 2] == 0), np.count_nonzero(sos[:, 5] == 0))
+        )
+        with self.assertRaisesRegex(DataError, f"at least {padlen + 1} samples"):
+            filter_iir(
+                validate_waveform(self.waveform(padlen, sample_rate_hz)),
+                design="butterworth",
+                response="lowpass",
+                cutoff_hz=100.0,
+                order=3,
+                mode="zero_phase",
+            )
+
+        minimum = validate_waveform(self.waveform(padlen + 1, sample_rate_hz))
+        with patch("scipy.signal.sosfiltfilt", wraps=scipy_signal.sosfiltfilt) as apply_filter:
+            result = filter_iir(
+                minimum,
+                design="butterworth",
+                response="lowpass",
+                cutoff_hz=100.0,
+                order=3,
+                mode="zero_phase",
+            )
+
+        self.assertEqual(result.zero_phase_padlen, padlen)
+        self.assertEqual(result.signal.voltage_v.size, padlen + 1)
+        self.assertEqual(
+            apply_filter.call_args.kwargs,
+            {"axis": -1, "padtype": "odd", "padlen": padlen},
+        )
+
+    @unittest.skipUnless(HAS_SCIPY, "SciPy analysis dependency is unavailable")
+    def test_zero_phase_iir_squares_the_single_pass_magnitude_response(self) -> None:
+        sample_rate_hz = 10_000.0
+        samples = 10_000
+        frequency_hz = 1000.0
+        time_s = np.arange(samples, dtype=float) / sample_rate_hz
+        voltage_v = np.sin(2 * np.pi * frequency_hz * time_s)
+        time_signal = validate_waveform(np.column_stack((time_s, voltage_v)))
+
+        causal = filter_iir(
+            time_signal,
+            design="butterworth",
+            response="lowpass",
+            cutoff_hz=frequency_hz,
+            order=4,
+            mode="causal",
+        ).signal.voltage_v
+        zero_phase = filter_iir(
+            time_signal,
+            design="butterworth",
+            response="lowpass",
+            cutoff_hz=frequency_hz,
+            order=4,
+            mode="zero_phase",
+        ).signal.voltage_v
+        interior = slice(2000, 8000)
+        basis = np.exp(-2j * np.pi * frequency_hz * time_s[interior])
+        causal_amplitude = 2 * abs(np.dot(causal[interior], basis)) / basis.size
+        zero_phase_amplitude = 2 * abs(np.dot(zero_phase[interior], basis)) / basis.size
+
+        self.assertAlmostEqual(zero_phase_amplitude, causal_amplitude**2, places=10)
+
+    @unittest.skipUnless(HAS_SCIPY, "SciPy analysis dependency is unavailable")
+    def test_iir_supports_low_high_bandpass_and_bandstop(self) -> None:
+        sample_rate_hz = 10_000.0
+        samples = 6000
+        frequencies = (500.0, 1500.0, 3000.0)
+        time_s = np.arange(samples, dtype=float) / sample_rate_hz
+        voltage_v = sum(np.sin(2 * np.pi * frequency * time_s) for frequency in frequencies)
+        time_signal = validate_waveform(np.column_stack((time_s, voltage_v)))
+        cases = {
+            "lowpass": (1000.0, {500.0}, {3000.0}),
+            "highpass": (2000.0, {3000.0}, {500.0}),
+            "bandpass": ([1000.0, 2000.0], {1500.0}, {500.0, 3000.0}),
+            "bandstop": ([1000.0, 2000.0], {500.0, 3000.0}, {1500.0}),
+        }
+
+        for response, (cutoff_hz, passed, rejected) in cases.items():
+            with self.subTest(response=response):
+                filtered = filter_iir(
+                    time_signal,
+                    design="butterworth",
+                    response=response,
+                    cutoff_hz=cutoff_hz,
+                    order=8,
+                    mode="zero_phase",
+                ).signal.voltage_v
+                interior = slice(500, -500)
+                interior_time = time_s[interior]
+                amplitudes = {
+                    frequency: 2
+                    * abs(
+                        np.dot(
+                            filtered[interior],
+                            np.exp(-2j * np.pi * frequency * interior_time),
+                        )
+                    )
+                    / interior_time.size
+                    for frequency in frequencies
+                }
+                for frequency in passed:
+                    self.assertGreater(amplitudes[frequency], 0.8)
+                for frequency in rejected:
+                    self.assertLess(amplitudes[frequency], 0.01)
+
+    @unittest.skipUnless(HAS_SCIPY, "SciPy analysis dependency is unavailable")
+    def test_iir_rejects_bad_sampling_parameters_and_unstable_sos(self) -> None:
+        time_signal = validate_waveform(self.waveform(1000, 10_000.0))
+        with self.assertRaisesRegex(DataError, "below Nyquist"):
+            filter_iir(
+                time_signal,
+                design="butterworth",
+                response="lowpass",
+                cutoff_hz=5000.0,
+                order=4,
+                mode="causal",
+            )
+
+        nonuniform = self.waveform(1000, 10_000.0)
+        nonuniform[500:, 0] += 1e-5
+        with self.assertRaisesRegex(DataError, "uniformly sampled"):
+            filter_iir(
+                validate_waveform(nonuniform),
+                design="butterworth",
+                response="lowpass",
+                cutoff_hz=1000.0,
+                order=4,
+                mode="causal",
+            )
+
+        unstable = np.array([[1.0, 0.0, 0.0, 1.0, -2.0, 0.0]])
+        with patch("scipy.signal.butter", return_value=unstable):
+            with self.assertRaisesRegex(DataError, "not stable"):
+                filter_iir(
+                    time_signal,
+                    design="butterworth",
+                    response="lowpass",
+                    cutoff_hz=1000.0,
+                    order=4,
+                    mode="causal",
+                )
+
+        invalid_sos = (
+            (np.ones((2, 5)), "Nx6 SOS"),
+            (np.array([[1.0, 0.0, 0.0, 2.0, 0.0, 0.0]]), "a0 = 1"),
+            (np.array([[1.0, np.nan, 0.0, 1.0, 0.0, 0.0]]), "non-finite"),
+        )
+        for sos, message in invalid_sos:
+            with self.subTest(message=message), patch(
+                "scipy.signal.butter", return_value=sos
+            ):
+                with self.assertRaisesRegex(DataError, message):
+                    filter_iir(
+                        time_signal,
+                        design="butterworth",
+                        response="lowpass",
+                        cutoff_hz=1000.0,
+                        order=4,
+                        mode="causal",
+                    )
+
+    def test_iir_parameters_are_validated_without_scipy(self) -> None:
+        time_signal = validate_waveform(self.waveform(100, 10_000.0))
+        cases = (
+            ({"design": "bessel"}, "design must be"),
+            ({"order": 0}, "order must be"),
+            ({"order": 13}, "order must be"),
+            ({"ripple_db": None}, "requires ripple_db"),
+            ({"ripple_db": 21.0}, "must be <= 20"),
+            ({"ripple_db": 20.0, "attenuation_db": 20.0}, "less than"),
+        )
+        for overrides, message in cases:
+            request = {
+                "design": "chebyshev1",
+                "response": "lowpass",
+                "cutoff_hz": 1000.0,
+                "order": 4,
+                "mode": "causal",
+                "ripple_db": 1.0,
+            }
+            request.update(overrides)
+            if "attenuation_db" in overrides:
+                request["design"] = "elliptic"
+            with self.subTest(overrides=overrides):
+                with self.assertRaisesRegex(DataError, message):
+                    filter_iir(time_signal, **request)
 
         with self.assertRaisesRegex(DataError, "below Nyquist"):
             filter_fir(

@@ -64,6 +64,17 @@ class RunReportTests(unittest.TestCase):
                                             "numtaps": 101,
                                             "mode": "zero_phase",
                                         },
+                                        {
+                                            "op": "filter",
+                                            "family": "iir",
+                                            "design": "elliptic",
+                                            "response": "bandstop",
+                                            "cutoff_hz": [49.0, 51.0],
+                                            "order": 6,
+                                            "ripple_db": 1.0,
+                                            "attenuation_db": 60.0,
+                                            "mode": "zero_phase",
+                                        },
                                         {"op": "fft"},
                                         {"op": "measure", "metrics": ["peak_frequency_hz"]},
                                     ],
@@ -95,6 +106,7 @@ class RunReportTests(unittest.TestCase):
             self.assertIn("capture_main", html)
             self.assertIn(
                 "remove_dc → filter(fir, bandstop, 49–51 Hz, 101 taps, zero_phase) "
+                "→ filter(iir, bandstop, 49–51 Hz, elliptic, order 6, zero_phase) "
                 "→ fft → measure",
                 html,
             )

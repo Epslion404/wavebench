@@ -48,6 +48,7 @@ operations = [
   { op = "measure", metrics = ["voltage_mean_v", "voltage_rms_v", "voltage_vpp_v"] },
   { op = "remove_dc" },
   { op = "filter", family = "fir", response = "bandstop", cutoff_hz = [49.0, 51.0], numtaps = 101, mode = "zero_phase" },
+  { op = "filter", family = "iir", design = "butterworth", response = "highpass", cutoff_hz = 20.0, order = 4, mode = "causal" },
   { op = "window", name = "hann" },
   { op = "fft" },
   { op = "measure", metrics = ["peak_frequency_hz", "peak_amplitude_v", "noise_floor_v", "thd_ratio"] },
@@ -69,13 +70,13 @@ thd_ratio = { max = 0.05 }
 | --- | --- | --- |
 | `remove_dc` | 无 | 时域 → 时域 |
 | `detrend` | `method = "linear"` | 时域 → 时域 |
-| `filter` | `family = "fir"`、`response`、`cutoff_hz`、奇数 `numtaps`、`mode` | 时域 → 时域 |
+| `filter` | FIR 或 IIR 的判别式设计参数 | 时域 → 时域 |
 | `window` | `name = "hann|hamming|blackman"` | 时域 → 时域 |
 | `fft` | 无 | 时域 → 频域 |
 | `measure` | 非空 `metrics` 数组 | 观察当前域，不改变数据 |
 | `export` | 安全的 `name`；`formats` 为 `npy`、`csv` 的非空子集 | 导出当前域，不改变数据 |
 
-`remove_dc`、`detrend`、`window` 和 `fft` 各至多出现一次；`remove_dc` 与 `detrend` 互斥。`filter` 可以重复，从而按声明顺序串联多个 FIR stage。去直流、去趋势和滤波必须位于窗口之前，所有时域变换必须位于 FFT 之前。测量指标和导出名称在同一流水线内不得重复，流水线至少包含一个 `measure` 或 `export`。
+`remove_dc`、`detrend`、`window` 和 `fft` 各至多出现一次；`remove_dc` 与 `detrend` 互斥。`filter` 可以重复，从而按声明顺序串联多个 FIR／IIR stage。去直流、去趋势和滤波必须位于窗口之前，所有时域变换必须位于 FFT 之前。测量指标和导出名称在同一流水线内不得重复，流水线至少包含一个 `measure` 或 `export`。
 
 ### FIR 滤波
 
@@ -96,7 +97,34 @@ FIR 需要可选分析依赖：
 python -m pip install -e ".[analysis]"
 ```
 
-只有 Plan 包含 FIR 算子时，`run check` 才检查 SciPy；缺少依赖时会在租约、session 和仪器 I/O 之前失败。未使用 FIR 的 NumPy 流水线不需要 SciPy。
+Plan 包含 FIR 或 IIR 算子时，`run check` 检查 SciPy；缺少依赖时会在租约、session 和仪器 I/O 之前失败。没有 filter 的 NumPy 流水线不需要 SciPy。
+
+### IIR 滤波
+
+IIR 继续使用同一个 `filter` 算子。`family = "iir"` 时必须声明 `design` 和 `order`：
+
+```toml
+{ op = "filter", family = "iir", design = "butterworth", response = "lowpass", cutoff_hz = 5000.0, order = 4, mode = "causal" }
+{ op = "filter", family = "iir", design = "chebyshev1", response = "highpass", cutoff_hz = 100.0, order = 4, ripple_db = 1.0, mode = "zero_phase" }
+{ op = "filter", family = "iir", design = "chebyshev2", response = "bandpass", cutoff_hz = [100.0, 5000.0], order = 6, attenuation_db = 40.0, mode = "causal" }
+{ op = "filter", family = "iir", design = "elliptic", response = "bandstop", cutoff_hz = [49.0, 51.0], order = 6, ripple_db = 1.0, attenuation_db = 60.0, mode = "zero_phase" }
+```
+
+参数按 `design` 严格区分：
+
+- `butterworth` 不接受 `ripple_db` 或 `attenuation_db`。
+- `chebyshev1` 必须且只接受 `ripple_db`。
+- `chebyshev2` 必须且只接受 `attenuation_db`。
+- `elliptic` 必须同时接受 `ripple_db` 和 `attenuation_db`，且纹波必须小于衰减。
+- `order` 必须是 1～12 的整数；`ripple_db` 位于 `(0, 20]`，`attenuation_db` 位于 `(0, 200]`。
+
+四种设计都支持低通、高通、带通和带阻，并固定使用 SciPy 的 SOS 输出。设计后会校验二阶节形状、有限系数、单位化分母和所有极点严格位于单位圆内。`order` 对低通／高通表示数字滤波器阶数，对带通／带阻表示原型阶数；带型变换后的数字滤波器阶数为 `2 * order`。
+
+单程临界频率的含义随设计而异：Butterworth 是 `-3 dB` 点；Chebyshev I 和 Elliptic 是通带纹波边缘；Chebyshev II 是阻带衰减边缘。`cutoff_hz` 始终表示单程 SciPy 设计参数，零相位输出不会重新把它解释为最终 `-3 dB` 点。
+
+`causal` 使用 `sosfilt` 和全零初始状态。`zero_phase` 使用 `sosfiltfilt` 与固定奇延拓；padding 长度根据实际 SOS 明确计算并写入 manifest，输入点数必须大于该长度。零相位的有效幅频响应仍是单程幅频响应的平方。两种模式都保留原时间轴和样本数。
+
+FIR 和 IIR 共用 `.[analysis]` 可选依赖。`run check` 根据 Plan 实际选择的 family、design 和 mode 检查所需 SciPy 函数；没有 filter 的流水线不触发该检查。
 
 时域指标为 `voltage_min_v`、`voltage_max_v`、`voltage_mean_v`、`voltage_rms_v` 和 `voltage_vpp_v`。频域指标为 `peak_frequency_hz`、`peak_amplitude_v`、`noise_floor_v`、`thd_ratio`，以及 `harmonic_2`～`harmonic_5` 的 `frequency_hz` 和 `amplitude_v` 字段。`[steps.expect]` 只能引用流水线中已显式选择的测量指标。
 

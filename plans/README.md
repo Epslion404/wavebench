@@ -13,7 +13,7 @@ wavebench run check --plan plans/example_scope_expect_quality.toml
 
 `run verify` 会读取配置并查询相关仪器，适合执行前预检。`run plan` 会进行真实实验，执行前应确认接线、scope coupling、输出状态、保护限值和 `[restore]` 范围。`run report` 和 `run calibrate` 读取已有产物，不需要再次连接仪器；校准相关拟合需要安装 `.[analysis]`。
 
-`example_signal_processing_pipeline.toml` 包含 FIR 带阻和零相位处理，也需要安装 `.[analysis]`。`run check` 只在 Plan 选择需要 SciPy 的算子时检查该可选依赖。
+`example_signal_processing_pipeline.toml` 包含 FIR 带阻、IIR 高通、因果和零相位处理，需要安装 `.[analysis]`。`run check` 只在 Plan 选择需要 SciPy 的算子时检查该可选依赖。
 
 ## 计划分类
 

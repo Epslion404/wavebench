@@ -26,6 +26,7 @@ operations = [
   { op = "measure", metrics = ["voltage_mean_v", "voltage_rms_v", "voltage_vpp_v"] },
   { op = "remove_dc" },
   { op = "filter", family = "fir", response = "bandstop", cutoff_hz = [49.0, 51.0], numtaps = 101, mode = "zero_phase" },
+  { op = "filter", family = "iir", design = "butterworth", response = "highpass", cutoff_hz = 20.0, order = 4, mode = "causal" },
   { op = "window", name = "hann" },
   { op = "fft" },
   { op = "measure", metrics = ["peak_frequency_hz", "peak_amplitude_v", "noise_floor_v", "thd_ratio", "harmonic_2_frequency_hz", "harmonic_2_amplitude_v"] },

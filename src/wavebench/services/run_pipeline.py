@@ -14,10 +14,12 @@ import numpy as np
 from wavebench.data.signal_pipeline import (
     FrequencySignal,
     FirFilterResult,
+    IirFilterResult,
     TimeSignal,
     detrend_linear,
     fft_signal,
     filter_fir,
+    filter_iir,
     measure_frequency,
     measure_time,
     remove_dc,
@@ -35,24 +37,48 @@ ANALYSIS_METRICS_SCHEMA = "wavebench.analysis_metrics.v1"
 
 
 def ensure_analysis_pipeline_dependencies(plan: RunPlan) -> None:
-    needs_scipy = any(
-        operation["op"] == "filter" and operation["family"] == "fir"
+    filters = [
+        operation
         for step in plan.steps
         if step.kind == "analysis.pipeline"
         for operation in step.fields["operations"]
-    )
-    if not needs_scipy:
+        if operation["op"] == "filter"
+    ]
+    if not filters:
         return
+    required_functions: set[str] = set()
+    for operation in filters:
+        if operation["family"] == "fir":
+            required_functions.add("firwin")
+            required_functions.add(
+                "lfilter" if operation["mode"] == "causal" else "filtfilt"
+            )
+        else:
+            required_functions.update({
+                {
+                    "butterworth": "butter",
+                    "chebyshev1": "cheby1",
+                    "chebyshev2": "cheby2",
+                    "elliptic": "ellip",
+                }[operation["design"]],
+                "sos2zpk",
+                "sosfilt" if operation["mode"] == "causal" else "sosfiltfilt",
+            })
     try:
         scipy_signal = import_module("scipy.signal")
     except ImportError as exc:
         raise ConfigError(
-            "analysis FIR filter requires SciPy; install WaveBench with `.[analysis]`"
+            "analysis filter requires SciPy; install WaveBench with `.[analysis]`"
         ) from exc
-    if not all(callable(getattr(scipy_signal, name, None)) for name in ("firwin", "lfilter", "filtfilt")):
+    missing = sorted(
+        name
+        for name in required_functions
+        if not callable(getattr(scipy_signal, name, None))
+    )
+    if missing:
         raise ConfigError(
-            "analysis FIR filter requires compatible SciPy signal support; "
-            "install WaveBench with `.[analysis]`"
+            "analysis filter requires compatible SciPy signal support "
+            f"({', '.join(missing)}); install WaveBench with `.[analysis]`"
         )
 
 
@@ -120,17 +146,32 @@ def execute_analysis_pipeline(
                     signal = detrend_linear(signal)
                 elif op == "filter":
                     assert isinstance(signal, TimeSignal)
-                    result = filter_fir(
-                        signal,
-                        response=operation["response"],
-                        cutoff_hz=operation["cutoff_hz"],
-                        numtaps=operation["numtaps"],
-                        mode=operation["mode"],
-                    )
+                    if operation["family"] == "fir":
+                        result = filter_fir(
+                            signal,
+                            response=operation["response"],
+                            cutoff_hz=operation["cutoff_hz"],
+                            numtaps=operation["numtaps"],
+                            mode=operation["mode"],
+                        )
+                        filter_metadata = _fir_filter_metadata(
+                            operation_index, operation, result
+                        )
+                    else:
+                        result = filter_iir(
+                            signal,
+                            design=operation["design"],
+                            response=operation["response"],
+                            cutoff_hz=operation["cutoff_hz"],
+                            order=operation["order"],
+                            mode=operation["mode"],
+                            ripple_db=operation.get("ripple_db"),
+                            attenuation_db=operation.get("attenuation_db"),
+                        )
+                        filter_metadata = _iir_filter_metadata(
+                            operation_index, operation, result
+                        )
                     signal = result.signal
-                    filter_metadata = _fir_filter_metadata(
-                        operation_index, operation, result
-                    )
                     filters.append(filter_metadata)
                     stage["filter"] = filter_metadata
                     sampling.update({
@@ -310,6 +351,75 @@ def _fir_filter_metadata(
             "method": "pad",
             "padtype": "odd",
             "padlen": 3 * numtaps,
+        })
+    return metadata
+
+
+def _iir_filter_metadata(
+    operation_index: int,
+    operation: dict[str, Any],
+    result: IirFilterResult,
+) -> dict[str, Any]:
+    design = operation["design"]
+    order = operation["order"]
+    mode = operation["mode"]
+    sections = int(result.sos.shape[0])
+    metadata: dict[str, Any] = {
+        "operation_index": operation_index,
+        "family": "iir",
+        "design": design,
+        "response": operation["response"],
+        "cutoff_hz": operation["cutoff_hz"],
+        "order": order,
+        "digital_filter_order": (
+            2 * order if operation["response"] in {"bandpass", "bandstop"} else order
+        ),
+        "sample_rate_hz": result.sample_rate_hz,
+        "design_function": {
+            "butterworth": "scipy.signal.butter",
+            "chebyshev1": "scipy.signal.cheby1",
+            "chebyshev2": "scipy.signal.cheby2",
+            "elliptic": "scipy.signal.ellip",
+        }[design],
+        "design_output": "sos",
+        "critical_frequency_semantics": {
+            "butterworth": "single_pass_minus_3_db",
+            "chebyshev1": "single_pass_passband_ripple_edge",
+            "chebyshev2": "single_pass_stopband_attenuation_edge",
+            "elliptic": "single_pass_passband_ripple_edge",
+        }[design],
+        "sections": sections,
+        "sos_shape": [sections, 6],
+        "sos_sha256": sha256(
+            np.asarray(result.sos, dtype="<f8").tobytes()
+        ).hexdigest(),
+        "scipy_version": result.scipy_version,
+        "stable": True,
+        "max_pole_magnitude": result.max_pole_magnitude,
+        "mode": mode,
+        "execution_function": (
+            "scipy.signal.sosfilt"
+            if mode == "causal"
+            else "scipy.signal.sosfiltfilt"
+        ),
+        "passes": 1 if mode == "causal" else 2,
+        "effective_magnitude_response": (
+            "single_pass" if mode == "causal" else "single_pass_squared"
+        ),
+    }
+    for name in ("ripple_db", "attenuation_db"):
+        if name in operation:
+            metadata[name] = operation[name]
+    if mode == "causal":
+        metadata.update({
+            "boundary": "zero_initial_state",
+            "initial_state": "zeros",
+        })
+    else:
+        metadata.update({
+            "boundary": "odd_extension",
+            "padtype": "odd",
+            "padlen": result.zero_phase_padlen,
         })
     return metadata
 

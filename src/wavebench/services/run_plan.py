@@ -13,6 +13,10 @@ from wavebench.data.signal_pipeline import (
     ANALYSIS_FIR_MODES,
     ANALYSIS_FIR_RESPONSES,
     ANALYSIS_FREQUENCY_METRICS,
+    ANALYSIS_IIR_DESIGNS,
+    ANALYSIS_IIR_MAX_ATTENUATION_DB,
+    ANALYSIS_IIR_MAX_ORDER,
+    ANALYSIS_IIR_MAX_RIPPLE_DB,
     ANALYSIS_TIME_METRICS,
 )
 from wavebench.errors import ConfigError
@@ -1276,7 +1280,18 @@ def _normalize_analysis_pipeline_fields(prefix: str, fields: dict[str, Any]) -> 
     allowed_fields = {
         "remove_dc": {"op"},
         "detrend": {"op", "method"},
-        "filter": {"op", "family", "response", "cutoff_hz", "numtaps", "mode"},
+        "filter": {
+            "op",
+            "family",
+            "design",
+            "response",
+            "cutoff_hz",
+            "numtaps",
+            "order",
+            "ripple_db",
+            "attenuation_db",
+            "mode",
+        },
         "window": {"op", "name"},
         "fft": {"op"},
         "measure": {"op", "metrics"},
@@ -1284,7 +1299,7 @@ def _normalize_analysis_pipeline_fields(prefix: str, fields: dict[str, Any]) -> 
     }
     required_fields = {
         "detrend": {"method"},
-        "filter": {"family", "response", "cutoff_hz", "numtaps", "mode"},
+        "filter": {"family", "response", "cutoff_hz", "mode"},
         "window": {"name"},
         "measure": {"metrics"},
         "export": {"name", "formats"},
@@ -1330,8 +1345,55 @@ def _normalize_analysis_pipeline_fields(prefix: str, fields: dict[str, Any]) -> 
 
         if op == "filter":
             family = raw_operation["family"]
-            if not isinstance(family, str) or family.strip().lower() != "fir":
-                raise ConfigError(f"{operation_prefix}.family must be 'fir'")
+            if not isinstance(family, str) or family.strip().lower() not in {"fir", "iir"}:
+                raise ConfigError(f"{operation_prefix}.family must be 'fir' or 'iir'")
+            family = family.strip().lower()
+            if family == "fir":
+                _validate_analysis_filter_fields(
+                    raw_operation,
+                    allowed={"op", "family", "response", "cutoff_hz", "numtaps", "mode"},
+                    required={"numtaps"},
+                    prefix=operation_prefix,
+                )
+                design = None
+            else:
+                _validate_analysis_filter_fields(
+                    raw_operation,
+                    allowed=set(raw_operation),
+                    required={"design", "order"},
+                    prefix=operation_prefix,
+                )
+                raw_design = raw_operation["design"]
+                if (
+                    not isinstance(raw_design, str)
+                    or raw_design.strip().lower() not in ANALYSIS_IIR_DESIGNS
+                ):
+                    raise ConfigError(
+                        f"{operation_prefix}.design must be one of "
+                        "butterworth, chebyshev1, chebyshev2, elliptic"
+                    )
+                design = raw_design.strip().lower()
+                design_fields = {
+                    "butterworth": set(),
+                    "chebyshev1": {"ripple_db"},
+                    "chebyshev2": {"attenuation_db"},
+                    "elliptic": {"ripple_db", "attenuation_db"},
+                }[design]
+                _validate_analysis_filter_fields(
+                    raw_operation,
+                    allowed={
+                        "op",
+                        "family",
+                        "design",
+                        "response",
+                        "cutoff_hz",
+                        "order",
+                        "mode",
+                        *design_fields,
+                    },
+                    required=design_fields,
+                    prefix=operation_prefix,
+                )
             response = raw_operation["response"]
             if (
                 not isinstance(response, str)
@@ -1342,47 +1404,75 @@ def _normalize_analysis_pipeline_fields(prefix: str, fields: dict[str, Any]) -> 
                     "lowpass, highpass, bandpass, bandstop"
                 )
             response = response.strip().lower()
-            raw_cutoff = raw_operation["cutoff_hz"]
-            if response in {"lowpass", "highpass"}:
-                cutoff: float | list[float] = _analysis_positive_float(
-                    raw_cutoff, f"{operation_prefix}.cutoff_hz"
-                )
-            else:
-                if not isinstance(raw_cutoff, list) or len(raw_cutoff) != 2:
-                    raise ConfigError(
-                        f"{operation_prefix}.cutoff_hz must be a two-element array "
-                        f"for {response}"
-                    )
-                cutoff = [
-                    _analysis_positive_float(value, f"{operation_prefix}.cutoff_hz")
-                    for value in raw_cutoff
-                ]
-                if cutoff[1] <= cutoff[0]:
-                    raise ConfigError(
-                        f"{operation_prefix}.cutoff_hz must be strictly increasing"
-                    )
-            numtaps = raw_operation["numtaps"]
-            if (
-                isinstance(numtaps, bool)
-                or not isinstance(numtaps, int)
-                or numtaps < 3
-                or numtaps % 2 == 0
-            ):
-                raise ConfigError(
-                    f"{operation_prefix}.numtaps must be an odd integer >= 3"
-                )
+            cutoff = _normalize_analysis_filter_cutoff(
+                raw_operation["cutoff_hz"],
+                response=response,
+                name=f"{operation_prefix}.cutoff_hz",
+            )
             mode = raw_operation["mode"]
             if not isinstance(mode, str) or mode.strip().lower() not in ANALYSIS_FIR_MODES:
                 raise ConfigError(
                     f"{operation_prefix}.mode must be 'causal' or 'zero_phase'"
                 )
-            operation.update({
-                "family": "fir",
-                "response": response,
-                "cutoff_hz": cutoff,
-                "numtaps": numtaps,
-                "mode": mode.strip().lower(),
-            })
+            normalized_mode = mode.strip().lower()
+            if family == "fir":
+                numtaps = raw_operation["numtaps"]
+                if (
+                    isinstance(numtaps, bool)
+                    or not isinstance(numtaps, int)
+                    or numtaps < 3
+                    or numtaps % 2 == 0
+                ):
+                    raise ConfigError(
+                        f"{operation_prefix}.numtaps must be an odd integer >= 3"
+                    )
+                operation = {
+                    "op": "filter",
+                    "family": "fir",
+                    "response": response,
+                    "cutoff_hz": cutoff,
+                    "numtaps": numtaps,
+                    "mode": normalized_mode,
+                }
+            else:
+                order = raw_operation["order"]
+                if (
+                    isinstance(order, bool)
+                    or not isinstance(order, int)
+                    or not 1 <= order <= ANALYSIS_IIR_MAX_ORDER
+                ):
+                    raise ConfigError(
+                        f"{operation_prefix}.order must be an integer from 1 to "
+                        f"{ANALYSIS_IIR_MAX_ORDER}"
+                    )
+                operation = {
+                    "op": "filter",
+                    "family": "iir",
+                    "design": design,
+                    "response": response,
+                    "cutoff_hz": cutoff,
+                    "order": order,
+                }
+                if "ripple_db" in raw_operation:
+                    operation["ripple_db"] = _analysis_bounded_positive_float(
+                        raw_operation["ripple_db"],
+                        f"{operation_prefix}.ripple_db",
+                        maximum=ANALYSIS_IIR_MAX_RIPPLE_DB,
+                    )
+                if "attenuation_db" in raw_operation:
+                    operation["attenuation_db"] = _analysis_bounded_positive_float(
+                        raw_operation["attenuation_db"],
+                        f"{operation_prefix}.attenuation_db",
+                        maximum=ANALYSIS_IIR_MAX_ATTENUATION_DB,
+                    )
+                if (
+                    design == "elliptic"
+                    and operation["ripple_db"] >= operation["attenuation_db"]
+                ):
+                    raise ConfigError(
+                        f"{operation_prefix}.ripple_db must be less than attenuation_db"
+                    )
+                operation["mode"] = normalized_mode
         elif op == "detrend":
             method = raw_operation["method"]
             if not isinstance(method, str) or method.lower() != "linear":
@@ -1468,6 +1558,46 @@ def _analysis_positive_float(value: Any, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigError(f"{name} must be a positive number")
     return _positive_float(value, name)
+
+
+def _analysis_bounded_positive_float(value: Any, name: str, *, maximum: float) -> float:
+    result = _analysis_positive_float(value, name)
+    if result > maximum:
+        raise ConfigError(f"{name} must be <= {maximum:g}")
+    return result
+
+
+def _normalize_analysis_filter_cutoff(
+    raw: Any,
+    *,
+    response: str,
+    name: str,
+) -> float | list[float]:
+    if response in {"lowpass", "highpass"}:
+        return _analysis_positive_float(raw, name)
+    if not isinstance(raw, list) or len(raw) != 2:
+        raise ConfigError(f"{name} must be a two-element array for {response}")
+    cutoff = [_analysis_positive_float(value, name) for value in raw]
+    if cutoff[1] <= cutoff[0]:
+        raise ConfigError(f"{name} must be strictly increasing")
+    return cutoff
+
+
+def _validate_analysis_filter_fields(
+    raw: dict[str, Any],
+    *,
+    allowed: set[str],
+    required: set[str],
+    prefix: str,
+) -> None:
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        names = ", ".join(repr(name) for name in unknown)
+        raise ConfigError(f"{prefix} filter has unknown field {names}")
+    missing = sorted(required - set(raw))
+    if missing:
+        names = ", ".join(repr(name) for name in missing)
+        raise ConfigError(f"{prefix} filter missing required field {names}")
 
 
 def _normalize_frequency_response_fields(prefix: str, fields: dict[str, Any]) -> None:

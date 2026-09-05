@@ -2054,12 +2054,14 @@ def _analysis_operation_label(operation: dict[str, Any]) -> str:
         cutoff_text = "–".join(_format_plain(value) for value in cutoff)
     else:
         cutoff_text = _format_plain(cutoff)
+    family = operation.get("family", "")
+    if family == "fir":
+        details = f"{operation.get('numtaps', '')} taps"
+    else:
+        details = f"{operation.get('design', '')}, order {operation.get('order', '')}"
     return (
-        "filter("
-        f"{operation.get('family', '')}, {operation.get('response', '')}, "
-        f"{cutoff_text} Hz, {operation.get('numtaps', '')} taps, "
-        f"{operation.get('mode', '')}"
-        ")"
+        f"filter({family}, {operation.get('response', '')}, {cutoff_text} Hz, "
+        f"{details}, {operation.get('mode', '')})"
     )
 
 

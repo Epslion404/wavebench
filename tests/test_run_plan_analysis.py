@@ -187,8 +187,8 @@ duration_s = 0.1
                 '{ op = "filter", family = "fir", response = "lowpass", '
                 'cutoff_hz = 1000, numtaps = 31 }'
             ),
-            "family must be 'fir'": (
-                '{ op = "filter", family = "iir", response = "lowpass", '
+            "family must be 'fir' or 'iir'": (
+                '{ op = "filter", family = "biquad", response = "lowpass", '
                 'cutoff_hz = 1000, numtaps = 31, mode = "causal" }'
             ),
             "response must be one of": (
@@ -289,6 +289,119 @@ duration_s = 0.1
         )
         with self.assertRaisesRegex(ConfigError, "unknown field 'taps'"):
             load_run_plan(self.write_plan(self.analysis_plan(unknown)))
+
+    def test_pipeline_normalizes_all_iir_designs_and_allows_mixed_filters(self) -> None:
+        plan = load_run_plan(
+            self.write_plan(
+                self.analysis_plan(
+                    """
+  { op = "filter", family = "IIR", design = "BUTTERWORTH", response = "LOWPASS", cutoff_hz = 1000, order = 4, mode = "CAUSAL" },
+  { op = "filter", family = "iir", design = "chebyshev1", response = "highpass", cutoff_hz = 100, order = 5, ripple_db = 1, mode = "zero_phase" },
+  { op = "filter", family = "iir", design = "chebyshev2", response = "bandpass", cutoff_hz = [100, 1000], order = 6, attenuation_db = 40, mode = "causal" },
+  { op = "filter", family = "iir", design = "elliptic", response = "bandstop", cutoff_hz = [49, 51], order = 12, ripple_db = 1, attenuation_db = 60, mode = "zero_phase" },
+  { op = "filter", family = "fir", response = "lowpass", cutoff_hz = 2000, numtaps = 31, mode = "causal" },
+  { op = "export", name = "filtered", formats = ["npy"] },
+"""
+                )
+            )
+        )
+
+        filters = plan.steps[1].fields["operations"][:5]
+        self.assertEqual(
+            [operation.get("design") for operation in filters],
+            ["butterworth", "chebyshev1", "chebyshev2", "elliptic", None],
+        )
+        self.assertEqual(filters[0]["order"], 4)
+        self.assertEqual(filters[1]["ripple_db"], 1.0)
+        self.assertNotIn("attenuation_db", filters[1])
+        self.assertEqual(filters[2]["attenuation_db"], 40.0)
+        self.assertEqual(filters[3]["cutoff_hz"], [49.0, 51.0])
+        self.assertEqual(filters[3]["ripple_db"], 1.0)
+        self.assertEqual(filters[3]["attenuation_db"], 60.0)
+        self.assertEqual(
+            filters[4],
+            {
+                "op": "filter",
+                "family": "fir",
+                "response": "lowpass",
+                "cutoff_hz": 2000.0,
+                "numtaps": 31,
+                "mode": "causal",
+            },
+        )
+        self.assertEqual(
+            list(filters[4]),
+            ["op", "family", "response", "cutoff_hz", "numtaps", "mode"],
+        )
+
+    def test_pipeline_iir_discriminated_parameters_are_strict(self) -> None:
+        common = (
+            'op = "filter", family = "iir", response = "lowpass", '
+            'cutoff_hz = 1000, mode = "causal"'
+        )
+        cases = {
+            "missing required field 'design', 'order'": f"{{ {common} }}",
+            "design must be one of": f'{{ {common}, design = "bessel", order = 4 }}',
+            "order must be an integer from 1 to 12": (
+                f'{{ {common}, design = "butterworth", order = 0 }}'
+            ),
+            "filter has unknown field 'ripple_db'": (
+                f'{{ {common}, design = "butterworth", order = 4, ripple_db = 1 }}'
+            ),
+            "missing required field 'ripple_db'": (
+                f'{{ {common}, design = "chebyshev1", order = 4 }}'
+            ),
+            "filter has unknown field 'attenuation_db'": (
+                f'{{ {common}, design = "chebyshev1", order = 4, '
+                "ripple_db = 1, attenuation_db = 40 }"
+            ),
+            "missing required field 'attenuation_db'": (
+                f'{{ {common}, design = "chebyshev2", order = 4 }}'
+            ),
+            "ripple_db must be > 0": (
+                f'{{ {common}, design = "chebyshev1", order = 4, ripple_db = 0 }}'
+            ),
+            "ripple_db must be <= 20": (
+                f'{{ {common}, design = "chebyshev1", order = 4, ripple_db = 21 }}'
+            ),
+            "attenuation_db must be <= 200": (
+                f'{{ {common}, design = "chebyshev2", order = 4, '
+                "attenuation_db = 201 }"
+            ),
+            "ripple_db must be less than attenuation_db": (
+                f'{{ {common}, design = "elliptic", order = 4, '
+                "ripple_db = 20, attenuation_db = 20 }"
+            ),
+            "filter has unknown field 'numtaps'": (
+                f'{{ {common}, design = "butterworth", order = 4, numtaps = 31 }}'
+            ),
+        }
+        for message, operation in cases.items():
+            with self.subTest(message=message):
+                operations = (
+                    f"{operation}, "
+                    '{ op = "export", name = "filtered", formats = ["npy"] }'
+                )
+                with self.assertRaisesRegex(ConfigError, message):
+                    load_run_plan(self.write_plan(self.analysis_plan(operations)))
+
+        for order in (13, 4.0, True):
+            with self.subTest(order=order):
+                value = str(order).lower()
+                operation = (
+                    f'{{ {common}, design = "butterworth", order = {value} }}, '
+                    '{ op = "export", name = "filtered", formats = ["npy"] }'
+                )
+                with self.assertRaisesRegex(ConfigError, "order must be an integer from 1 to 12"):
+                    load_run_plan(self.write_plan(self.analysis_plan(operation)))
+
+        fir_with_iir_field = (
+            '{ op = "filter", family = "fir", response = "lowpass", '
+            'cutoff_hz = 1000, numtaps = 31, mode = "causal", order = 4 }, '
+            '{ op = "export", name = "filtered", formats = ["npy"] }'
+        )
+        with self.assertRaisesRegex(ConfigError, "filter has unknown field 'order'"):
+            load_run_plan(self.write_plan(self.analysis_plan(fir_with_iir_field)))
 
     def test_pipeline_rejects_duplicate_and_misordered_configuration(self) -> None:
         cases = {
