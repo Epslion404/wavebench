@@ -29,7 +29,7 @@ from wavebench.data.signal_pipeline import (
     welch_psd,
 )
 from wavebench.errors import ConfigError, DataError, error_envelope
-from wavebench.data.pipeline_operations import measure_band
+from wavebench.data.pipeline_operations import measure_band, detect_peaks
 from wavebench.services.run_analysis import evaluate_expect
 from wavebench.services.run_artifacts import RunStepRecord
 from wavebench.services.run_plan import RunPlan, RunStep
@@ -51,13 +51,15 @@ def ensure_operation_dependencies(all_operations: list[dict[str, Any]]) -> None:
     operations = [
         operation
         for operation in all_operations
-        if operation["op"] in {"filter", "psd"}
+        if operation["op"] in {"filter", "psd", "peaks"}
     ]
     if not operations:
         return
     required_functions: set[str] = set()
     for operation in operations:
-        if operation["op"] == "psd":
+        if operation["op"] == "peaks":
+            required_functions.add("find_peaks")
+        elif operation["op"] == "psd":
             required_functions.update({"welch", "get_window"})
         elif operation["family"] == "fir":
             required_functions.add("firwin")
@@ -136,12 +138,13 @@ def execute_pipeline(
         for metric in operation["metrics"]
     }
     for operation in operations:
-        if operation["op"] == "measure_band":
+        if operation["op"] in {"measure_band", "peaks"}:
             metrics.update({f"{operation['name']}_{metric}": None for metric in operation["metrics"]})
     warnings: list[str] = []
     exports: list[dict[str, Any]] = []
     stages: list[dict[str, Any]] = []
     filters: list[dict[str, Any]] = []
+    peaks: list[dict[str, Any]] = []
     sampling: dict[str, Any] | None = None
     window: dict[str, Any] | None = None
     psd: dict[str, Any] | None = None
@@ -259,6 +262,30 @@ def execute_pipeline(
                     if psd_warnings:
                         stage["warnings"] = psd_warnings
                         _extend_unique(warnings, psd_warnings)
+                elif op == "peaks":
+                    detected = detect_peaks(signal, operation)
+                    peak_dir = processing_dir / "peaks"
+                    peak_dir.mkdir(exist_ok=True)
+                    json_path = peak_dir / f"{operation['name']}.json"
+                    csv_path = peak_dir / f"{operation['name']}.csv"
+                    _atomic_write_json(json_path, detected)
+                    columns = ["index", "position", "value", "prominence", "width", "polarity"]
+                    _atomic_write_csv(csv_path, columns, np.asarray([
+                        [row[key] for key in columns] for row in detected["peaks"]
+                    ]).reshape(-1, len(columns)))
+                    metadata = {key: value for key, value in detected.items() if key != "peaks"}
+                    metadata.update({
+                        "json": _derived_relative(json_path, run_dir),
+                        "csv": _derived_relative(csv_path, run_dir),
+                        "json_sha256": _sha256_file(json_path), "csv_sha256": _sha256_file(csv_path),
+                    })
+                    peaks.append(metadata)
+                    stage["peaks"] = metadata
+                    metrics[f"{operation['name']}_count"] = detected["count"]
+                    if detected["truncated"]:
+                        message = f"{operation['name']}: peak table truncated to {detected['retained_count']} rows"
+                        stage["warnings"] = [message]
+                        _extend_unique(warnings, [message])
                 elif op == "measure_band":
                     assert isinstance(signal, PsdSignal)
                     measured, metadata, operation_warnings = measure_band(signal, operation)
@@ -351,6 +378,8 @@ def execute_pipeline(
         manifest["filters"] = filters
     if psd is not None:
         manifest["psd"] = psd
+    if peaks:
+        manifest["peaks"] = peaks
     if failed_stage is not None:
         manifest["failed_stage"] = failed_stage
     if failure is not None:
@@ -372,6 +401,8 @@ def execute_pipeline(
     }
     if failed_stage is not None:
         pipeline_artifact["failed_stage"] = failed_stage
+    if peaks:
+        pipeline_artifact["peaks"] = peaks
     if failure is not None:
         pipeline_artifact["error"] = failure
 

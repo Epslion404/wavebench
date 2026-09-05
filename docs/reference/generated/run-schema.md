@@ -251,6 +251,8 @@ analysis.pipeline metrics:
 analysis.pipeline PSD operation:
   psd requires method=welch, window=hann|hamming|blackman, nperseg>=4, 0<=noverlap<nperseg, nfft>=nperseg, detrend=none|constant|linear, average=mean|median.
   All parameters are explicit; lengths are integers. Segment windows are periodic.
-  Requires time data before window or fft. Only export or measure_band may follow psd; at least one PSD result is required.
+  Requires time data before window or fft. Only export, measure_band or peaks may follow psd; at least one PSD result is required.
   Requires optional SciPy. Exports frequency_hz,psd_v2_per_hz with one-sided density scaling.
+  peaks requires name, polarity=positive|negative|both, height>=0, prominence>=0, distance>0, width>=0, max_peaks=1..10000, metrics=[count].
+  Peak distance/width use seconds in time and Hz in spectra; spectral polarity must be positive. Produces <name>_count and JSON/CSV tables without changing signal domain.
 ```

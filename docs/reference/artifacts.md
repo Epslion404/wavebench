@@ -2,6 +2,8 @@
 
 ## 独立离线分析
 
+`peaks` 将峰列表写入处理目录的 `peaks/<name>.json` 和 `peaks/<name>.csv`。JSON 使用 `wavebench.peaks.v1`，记录数据域、单位、SciPy 版本、检测输入两列 little-endian float64 的 SHA-256、完整数量、保留数量、截断状态和峰属性。CSV 列为 `index,position,value,prominence,width,polarity`；极性以 1／-1 表示。manifest、对应 stage 及 step artifact 条件性增加峰表路径与文件摘要。后续算子失败保留已完成峰表，截断会记录警告。
+
 `analysis report <analysis-or-run-dir> [...] --output comparison.html` 读取已保存的导出，生成独立 HTML；输出文件必须尚不存在。常规 run HTML 报告也会展示派生曲线。时域和 FFT 纵轴单位为 V，PSD 为 V²/Hz，使用线性坐标；同来源摘要、通道与数据域的曲线可叠加，不同来源分开显示。图形保留真实横轴，不自动补偿滤波延迟。
 
 报告检查导出路径与 SHA-256，损坏或缺失导出显示警告。NPY 和 CSV 同时存在时优先读取 NPY，读取失败可回退到 CSV。显示抽稀保留局部极值，指标始终来自完整数据的既有产物；报告不重新执行算子。

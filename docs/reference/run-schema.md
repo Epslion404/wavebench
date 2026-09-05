@@ -87,6 +87,7 @@ thd_ratio = { max = 0.05 }
 | `psd` | Welch 分段参数，见下文 | 时域 → PSD |
 | `measure` | 非空 `metrics` 数组 | 观察当前域，不改变数据 |
 | `measure_band` | `name`、`band_hz`、`exclude_hz`、`metrics` | 观察 PSD，不改变数据 |
+| `peaks` | 命名检测、筛选条件和数量上限，见下文 | 观察当前域，不改变数据 |
 | `export` | 安全的 `name`；`formats` 为 `npy`、`csv` 的非空子集 | 导出当前域，不改变数据 |
 
 `remove_dc`、`detrend`、`window` 和 `fft` 各至多出现一次；`remove_dc` 与 `detrend` 互斥。`filter` 可以重复，从而按声明顺序串联多个 FIR／IIR stage。去直流、去趋势和滤波必须位于窗口之前，所有时域变换必须位于 FFT 之前。测量指标和导出名称在同一流水线内不得重复，流水线至少包含一个 `measure` 或 `export`。
@@ -158,7 +159,19 @@ PSD 算子将时域数据转换为单边功率谱密度，单位为 `V²/Hz`。�
 | `detrend` | `none`、`constant` 或 `linear`，在每段加窗前执行 |
 | `average` | `mean` 或经过偏差修正的 `median` |
 
-PSD 可以跟在去直流、去趋势或 FIR／IIR 之后，但不能跟在整段 `window` 或 `fft` 之后。每条流水线至多有一个 PSD；PSD 之后允许 `export` 和 `measure_band`，至少执行其中一个。需要同时生成 FFT 和 PSD 时，使用两个分析 step 引用同一个 capture。PSD 的频带测量不复用 FFT 的峰值幅度、THD 或噪声底。
+PSD 可以跟在去直流、去趋势或 FIR／IIR 之后，但不能跟在整段 `window` 或 `fft` 之后。每条流水线至多有一个 PSD；PSD 之后允许 `export`、`measure_band` 和 `peaks`，至少执行其中一个。需要同时生成 FFT 和 PSD 时，使用两个分析 step 引用同一个 capture。PSD 的频带测量不复用 FFT 的峰值幅度、THD 或噪声底。
+
+### 通用峰值检测
+
+```toml
+{ op = "peaks", name = "tones", polarity = "positive", height = 0.01, prominence = 0.01, distance = 10, width = 0, max_peaks = 20, metrics = ["count"] }
+```
+
+所有字段必填。`height`、`prominence`、`width` 非负，零值表示不设对应下限；`distance` 必须为正；`max_peaks` 为 1～10000 的整数。时域支持 `positive`、`negative` 和 `both`，FFT／PSD 只允许 `positive`。极性表示局部极大／极小方向，不保证电压绝对正负；例如负直流偏置上的局部极大值，在 `height = 0` 时也会保留。负峰在电压取反后检测，结果仍保存原始电压。高度和显著性单位随域为 V 或 V²/Hz；距离和宽度单位在时域为秒、频域为 Hz。时域要求等间隔采样。
+
+先按高度、显著性、半显著性宽度筛选，再以带极性的高度降序、位置升序确定间隔竞争和输出顺序，最后截断至上限。负峰的高度按取反后的值排序，正负峰共同竞争间隔。端点不视为峰，平台峰选择中间样本，偶数长度时取靠前样本；不对峰位置做亚 bin 插值。峰宽使用半显著性高度的插值交点。
+
+`metrics = ["count"]` 显式生成 `<name>_count`，表示截断前、筛选后峰数量，可用于 `expect`。峰列表写入独立 JSON／CSV；空列表是合法结果。检测不改变信号数据域，可继续变换、测量或导出。报告只在峰表的信号摘要与绘制曲线一致时标记峰。
 
 ### PSD 频带验收
 

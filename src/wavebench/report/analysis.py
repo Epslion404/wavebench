@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from html import escape
+from hashlib import sha256
 import json
 from pathlib import Path
 from typing import Any
@@ -54,7 +55,8 @@ def display_samples(data: np.ndarray, maximum: int = 1200) -> np.ndarray:
     return data[sorted(indices)]
 
 
-def curves_svg(curves: list[tuple[str, np.ndarray]], x_label: str, units: str) -> str:
+def curves_svg(curves: list[tuple[str, np.ndarray]], x_label: str, units: str,
+               markers: dict[str, list[dict]] | None = None) -> str:
     width, height, pad = 900, 300, 55
     xmin = min(float(data[0, 0]) for _, data in curves)
     xmax = max(float(data[-1, 0]) for _, data in curves)
@@ -75,6 +77,10 @@ def curves_svg(curves: list[tuple[str, np.ndarray]], x_label: str, units: str) -
         points = " ".join(f"{pad+(x-xmin)/(xmax-xmin)*(width-2*pad):.2f},{height-pad-(y-ymin)/(ymax-ymin)*(height-2*pad):.2f}"
                           for x, y in sampled)
         parts.append(f'<polyline points="{points}" fill="none" stroke="{colors[index % len(colors)]}" stroke-width="1.5"><title>{escape(label)}</title></polyline>')
+        for peak in (markers or {}).get(label, []):
+            px = pad + (peak["position"] - xmin) / (xmax - xmin) * (width - 2 * pad)
+            py = height - pad - (peak["value"] - ymin) / (ymax - ymin) * (height - 2 * pad)
+            parts.append(f'<circle class="peak-marker" cx="{px:.2f}" cy="{py:.2f}" r="3" fill="{colors[index % len(colors)]}"><title>{peak["position"]:.6g}: {peak["value"]:.6g}</title></circle>')
     parts.append(f'<text x="450" y="294" text-anchor="middle">{escape(x_label)}</text><text x="55" y="20">{escape(units)}</text></svg>')
     parts.append("<ul>" + "".join(f'<li style="color:{colors[i % len(colors)]}">{escape(label)}</li>' for i, (label, _) in enumerate(curves)) + "</ul>")
     return "".join(parts)
@@ -83,6 +89,7 @@ def curves_svg(curves: list[tuple[str, np.ndarray]], x_label: str, units: str) -
 def render_analysis_sections(entries: list[tuple[Path, str, dict[str, Any]]], *, details: bool = True) -> str:
     groups: dict[tuple, list[tuple[str, np.ndarray]]] = {}
     sections: list[str] = []
+    markers: dict[str, list[dict]] = {}
     for root, label, artifact in entries:
         try:
             pipeline = artifact["analysis_pipeline"]
@@ -91,6 +98,20 @@ def render_analysis_sections(entries: list[tuple[Path, str, dict[str, Any]]], *,
                 sections.append(f"<h3>{escape(label)}</h3><pre>{escape(json.dumps(artifact, indent=2, ensure_ascii=False))}</pre>")
             sections.append(f'<p>{escape(label)}: sampling={escape(json.dumps(manifest.get("sampling")))}</p>')
             source = manifest["source"]
+            peak_sets = {}
+            for peak in manifest.get("peaks", []):
+                try:
+                    peak_file = artifact_file(root, peak["json"])
+                    if _sha256_file(peak_file) != peak["json_sha256"]:
+                        raise ValueError("peak table SHA-256 mismatch")
+                    detected = json.loads(peak_file.read_text())
+                    rows = detected["peaks"]
+                    if not isinstance(rows, list) or any(not isinstance(row, dict) or not all(isinstance(row.get(key), (int, float)) and np.isfinite(row[key]) for key in ("position", "value")) for row in rows):
+                        raise ValueError("invalid peak table")
+                    peak_sets.setdefault(detected["signal_sha256"], []).extend(rows)
+                    sections.append(f'<p>{escape(label)}: {escape(peak["name"])} peaks={escape(str(peak["count"]))}, retained={escape(str(peak["retained_count"]))}</p>')
+                except (OSError, ValueError, TypeError, KeyError) as exc:
+                    sections.append(f'<p class="warning">Peak table unavailable: {escape(str(exc))}</p>')
             seen: set[tuple] = set()
             for item in sorted(manifest["exports"], key=lambda x: x.get("format") != "npy"):
                 try:
@@ -110,14 +131,18 @@ def render_analysis_sections(entries: list[tuple[Path, str, dict[str, Any]]], *,
                         raise ValueError("invalid export values or axis")
                     seen.add(identity)
                     key = (source.get("npy_sha256") or label, source.get("channel"), columns)
-                    groups.setdefault(key, []).append((f"{label}: {item['name']}", data[:, [0, column]]))
+                    curve_label = f"{label}: {item['name']}"
+                    curve = data[:, [0, column]]
+                    groups.setdefault(key, []).append((curve_label, curve))
+                    fingerprint = sha256(np.asarray(curve, dtype="<f8").tobytes()).hexdigest()
+                    markers[curve_label] = peak_sets.get(fingerprint, [])
                 except (OSError, ValueError, TypeError, KeyError) as exc:
                     sections.append(f'<p class="warning">{escape(label)}: curve unavailable: {escape(str(exc))}</p>')
         except (OSError, ValueError, TypeError, KeyError) as exc:
             sections.append(f'<p class="warning">{escape(label)}: analysis unavailable: {escape(str(exc))}</p>')
     for (_, _, columns), curves in groups.items():
         _, x_label, units = COLUMNS[columns]
-        sections.append(curves_svg(curves, x_label, units))
+        sections.append(curves_svg(curves, x_label, units, markers))
     if entries and not groups:
         sections.append("<p>No usable curve exports / 没有可用的曲线导出</p>")
     return "".join(sections)

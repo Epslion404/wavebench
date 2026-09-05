@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import re
+from hashlib import sha256
 from typing import Any
 
 import numpy as np
 
-from wavebench.data.signal_pipeline import PsdSignal
+from wavebench.data.signal_pipeline import (
+    FrequencySignal, PsdSignal, TimeSignal, _uniform_sample_interval,
+)
 from wavebench.errors import DataError
 
 
@@ -35,6 +38,84 @@ def interval(value: Any, name: str) -> list[float]:
     if result[0] >= result[1]:
         raise DataError(f"{name} limits must increase")
     return result
+
+
+def integer(value: Any, name: str, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise DataError(f"{name} must be an integer in [{minimum}, {maximum}]")
+    return value
+
+
+def normalize_peaks(operation: dict[str, Any]) -> dict[str, Any]:
+    if operation["polarity"] not in ("positive", "negative", "both"):
+        raise DataError("peak polarity must be positive, negative or both")
+    if operation["metrics"] != ["count"]:
+        raise DataError("peaks metrics must explicitly select [count]")
+    normalized = dict(op="peaks", name=result_name(operation["name"]),
+                      polarity=operation["polarity"], metrics=["count"])
+    for key in ("height", "prominence", "distance", "width"):
+        normalized[key] = number(operation[key], key)
+    if normalized["distance"] == 0:
+        raise DataError("peak distance must be > 0")
+    normalized["max_peaks"] = integer(operation["max_peaks"], "max_peaks", 1, 10000)
+    return normalized
+
+
+def detect_peaks(signal: TimeSignal | FrequencySignal | PsdSignal, operation: dict[str, Any]) -> dict:
+    operation = normalize_peaks(operation)
+    if isinstance(signal, TimeSignal):
+        interval_s = _uniform_sample_interval(signal, "peak detection")
+        axis, values = signal.time_s, signal.voltage_v
+        spacing, domain, axis_unit, units = interval_s, "time", "s", "V"
+    else:
+        if operation["polarity"] != "positive":
+            raise DataError("spectral peaks require positive polarity")
+        axis = signal.frequency_hz
+        values = signal.amplitude_v if isinstance(signal, FrequencySignal) else signal.psd_v2_per_hz
+        spacing = float(axis[1] - axis[0])
+        domain = "frequency" if isinstance(signal, FrequencySignal) else "psd"
+        axis_unit, units = "Hz", "V" if domain == "frequency" else "V^2/Hz"
+    from scipy import __version__ as scipy_version
+    from scipy.signal import find_peaks
+
+    candidates = []
+    signs = (1, -1) if operation["polarity"] == "both" else ((1,) if operation["polarity"] == "positive" else (-1,))
+    for sign in signs:
+        indices, properties = find_peaks(
+            values * sign, height=operation["height"] or None,
+            prominence=(operation["prominence"], None), width=(None, None), rel_height=.5,
+        )
+        for i, index in enumerate(indices):
+            width = float(properties["widths"][i] * spacing)
+            if width < operation["width"]:
+                continue
+            candidates.append({
+                "index": int(index), "position": float(axis[index]), "value": float(values[index]),
+                "prominence": float(properties["prominences"][i]), "width": width, "polarity": sign,
+            })
+    candidates.sort(key=lambda peak: (-peak["value"] * peak["polarity"], peak["position"], -peak["polarity"]))
+    # Higher signed height wins; equal heights keep the earlier sample deterministically.
+    accepted = []
+    blocked = np.zeros(len(axis), dtype=bool)
+    for peak in candidates:
+        if blocked[peak["index"]]:
+            continue
+        left = np.searchsorted(axis, peak["position"] - operation["distance"], side="right")
+        right = np.searchsorted(axis, peak["position"] + operation["distance"], side="left")
+        blocked[left:right] = True
+        blocked[peak["index"]] = True
+        accepted.append(peak)
+    if any(not np.isfinite(row[key]) for row in accepted for key in ("position", "value", "prominence", "width")):
+        raise DataError("peak properties must be finite")
+    return {
+        "schema": "wavebench.peaks.v1", "name": operation["name"], "domain": domain,
+        "axis_unit": axis_unit, "value_unit": units, "scipy_version": scipy_version,
+        "signal_sha256": sha256(np.asarray(np.column_stack((axis, values)), dtype="<f8").tobytes()).hexdigest(),
+        "count": len(accepted), "retained_count": min(len(accepted), operation["max_peaks"]),
+        "truncated": len(accepted) > operation["max_peaks"],
+        "width_rule": "half_prominence", "endpoint_rule": "excluded",
+        "peaks": accepted[:operation["max_peaks"]],
+    }
 
 
 def normalize_band(operation: dict[str, Any]) -> dict[str, Any]:
