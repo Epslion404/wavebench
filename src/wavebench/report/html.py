@@ -2035,6 +2035,12 @@ def _signal_processing_block(run: RunPackage, output_dir: Path) -> str:
         )
     if not rows:
         return ""
+    from .analysis import render_analysis_sections
+
+    curves = render_analysis_sections([
+        (run.path, str(step.get("id", step["index"])), step.get("artifact", {}))
+        for step in run.steps if step.get("kind") == "analysis.pipeline"
+    ], details=False)
     return f"""<h2>信号处理 / Signal processing</h2>
 <div class="table compact-table"><table>
 <thead><tr><th>步骤 / Step</th><th>状态 / Status</th><th>来源 / Source</th><th>算子 / Operations</th><th>指标 / Metrics</th><th>警告 / Warnings</th><th>失败阶段 / Failed stage</th><th>产物 / Artifacts</th></tr></thead>
@@ -2042,6 +2048,7 @@ def _signal_processing_block(run: RunPackage, output_dir: Path) -> str:
 {chr(10).join(rows)}
 </tbody>
 </table></div>
+{curves}
 """
 
 

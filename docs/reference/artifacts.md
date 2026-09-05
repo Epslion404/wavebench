@@ -2,6 +2,10 @@
 
 ## 独立离线分析
 
+`analysis report <analysis-or-run-dir> [...] --output comparison.html` 读取已保存的导出，生成独立 HTML；输出文件必须尚不存在。常规 run HTML 报告也会展示派生曲线。时域和 FFT 纵轴单位为 V，PSD 为 V²/Hz，使用线性坐标；同来源摘要、通道与数据域的曲线可叠加，不同来源分开显示。图形保留真实横轴，不自动补偿滤波延迟。
+
+报告检查导出路径与 SHA-256，损坏或缺失导出显示警告。NPY 和 CSV 同时存在时优先读取 NPY，读取失败可回退到 CSV。显示抽稀保留局部极值，指标始终来自完整数据的既有产物；报告不重新执行算子。
+
 `analysis run` 在新输出目录写入 `analysis.json`、`manifest.json`、`metrics.json` 和 `exports/`。`analysis.json` 使用 `wavebench.analysis.v1`，包含总体状态、WaveBench 版本、规范化配方及其 SHA-256、来源与处理结果。manifest 使用 `wavebench.offline_pipeline.v1`，复用 stage 与数值字段；派生路径以该分析目录为基准。
 
 离线来源记录 capture package 绝对路径、通道、包内相对 NPY 路径及原始摘要。来源没有状态字段时记录 `null`，不推断为采集成功。不生成虚构 run 或采集 step，既有 RunPlan 的产物 schema 与来源路径合同保持不变。

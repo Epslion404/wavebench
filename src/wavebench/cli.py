@@ -1077,6 +1077,11 @@ def _main(argv: list[str] | None = None) -> int:
                 log_path=args.log_file,
             )
         if args.domain == "analysis":
+            if args.command == "report":
+                from .report.analysis import write_analysis_report
+
+                print(write_analysis_report([Path(path) for path in args.paths], Path(args.output)))
+                return 0
             from .services.analysis_service import check_analysis, run_analysis
 
             options = dict(capture=Path(args.capture), channel=args.channel, recipe=Path(args.recipe))

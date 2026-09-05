@@ -45,6 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
     capture_parser = subparsers.add_parser("capture", help="Offline capture package commands")
     analysis_parser = subparsers.add_parser("analysis", help="Offline signal processing")
     analysis_sub = analysis_parser.add_subparsers(dest="command", required=True)
+    analysis_report = analysis_sub.add_parser("report", help="Plot persisted analysis exports")
+    analysis_report.add_argument("paths", nargs="+")
+    analysis_report.add_argument("--output", required=True)
     for command in ("check", "run"):
         analysis_command = analysis_sub.add_parser(command)
         analysis_command.add_argument("--capture", required=True)
