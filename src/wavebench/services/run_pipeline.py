@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 import numpy as np
 
@@ -39,11 +39,17 @@ ANALYSIS_METRICS_SCHEMA = "wavebench.analysis_metrics.v1"
 
 
 def ensure_analysis_pipeline_dependencies(plan: RunPlan) -> None:
+    ensure_operation_dependencies([
+        operation
+        for step in plan.steps if step.kind == "analysis.pipeline"
+        for operation in step.fields["operations"]
+    ])
+
+
+def ensure_operation_dependencies(all_operations: list[dict[str, Any]]) -> None:
     operations = [
         operation
-        for step in plan.steps
-        if step.kind == "analysis.pipeline"
-        for operation in step.fields["operations"]
+        for operation in all_operations
         if operation["op"] in {"filter", "psd"}
     ]
     if not operations:
@@ -96,11 +102,32 @@ def execute_analysis_pipeline(
     processing_dir = run_dir / "processing" / (
         f"{step.index:02d}_{step.id or 'analysis_pipeline'}"
     )
+    def load_source() -> tuple[dict[str, Any], np.ndarray]:
+        _, details, waveform = _load_source_waveform(
+            run_dir=run_dir, source_step=source_step, source_record=source_record,
+        )
+        return details, waveform
+
+    return execute_pipeline(
+        run_dir=run_dir, processing_dir=processing_dir, fields=step.fields,
+        source={
+            "step": source_step.id, "step_index": source_step.index,
+            "status": source_record.status if source_record is not None else "unavailable",
+        },
+        load_source=load_source,
+    )
+
+
+def execute_pipeline(
+    *, run_dir: Path, processing_dir: Path, fields: dict[str, Any],
+    source: dict[str, Any], load_source: Callable[[], tuple[dict[str, Any], np.ndarray]],
+    schema: str = ANALYSIS_PIPELINE_SCHEMA,
+) -> dict[str, Any]:
     processing_dir.mkdir(parents=True, exist_ok=False)
     metrics_path = processing_dir / "metrics.json"
     manifest_path = processing_dir / "manifest.json"
 
-    operations = step.fields["operations"]
+    operations = fields["operations"]
     metrics: dict[str, float | None] = {
         metric: None
         for operation in operations
@@ -114,20 +141,11 @@ def execute_analysis_pipeline(
     sampling: dict[str, Any] | None = None
     window: dict[str, Any] | None = None
     psd: dict[str, Any] | None = None
-    source: dict[str, Any] = {
-        "step": source_step.id,
-        "step_index": source_step.index,
-        "status": source_record.status if source_record is not None else "unavailable",
-    }
     failure: dict[str, Any] | None = None
     failed_stage: str | None = None
 
     try:
-        _, source_details, waveform = _load_source_waveform(
-            run_dir=run_dir,
-            source_step=source_step,
-            source_record=source_record,
-        )
+        source_details, waveform = load_source()
         source.update(source_details)
         signal: TimeSignal | FrequencySignal | PsdSignal = validate_waveform(waveform)
         sampling = _time_sampling(signal)
@@ -300,7 +318,7 @@ def execute_analysis_pipeline(
         "metrics": metrics,
     }
     manifest: dict[str, Any] = {
-        "schema": ANALYSIS_PIPELINE_SCHEMA,
+        "schema": schema,
         "status": status,
         "partial": partial,
         "source": source,
@@ -330,11 +348,11 @@ def execute_analysis_pipeline(
     _atomic_write_json(manifest_path, manifest)
 
     pipeline_artifact: dict[str, Any] = {
-        "schema": ANALYSIS_PIPELINE_SCHEMA,
+        "schema": schema,
         "status": status,
         "manifest": _derived_relative(manifest_path, run_dir),
         "metrics": _derived_relative(metrics_path, run_dir),
-        "source_step": source_step.id,
+        "source_step": source.get("step"),
         "source_status": source["status"],
         "operations": operations,
         "warnings": warnings,
@@ -349,8 +367,8 @@ def execute_analysis_pipeline(
         "analysis_pipeline": pipeline_artifact,
         "metrics": metrics,
     }
-    if "expect" in step.fields:
-        artifact["expect"] = evaluate_expect(metrics, step.fields["expect"])
+    if "expect" in fields:
+        artifact["expect"] = evaluate_expect(metrics, fields["expect"])
     return artifact
 
 

@@ -1,5 +1,11 @@
 # 运行产物 Reference
 
+## 独立离线分析
+
+`analysis run` 在新输出目录写入 `analysis.json`、`manifest.json`、`metrics.json` 和 `exports/`。`analysis.json` 使用 `wavebench.analysis.v1`，包含总体状态、WaveBench 版本、规范化配方及其 SHA-256、来源与处理结果。manifest 使用 `wavebench.offline_pipeline.v1`，复用 stage 与数值字段；派生路径以该分析目录为基准。
+
+离线来源记录 capture package 绝对路径、通道、包内相对 NPY 路径及原始摘要。来源没有状态字段时记录 `null`，不推断为采集成功。不生成虚构 run 或采集 step，既有 RunPlan 的产物 schema 与来源路径合同保持不变。
+
 本页说明 `run plan` 写入的运行产物入口。字段的 machine source 是 `src/wavebench/services/run_artifacts.py` 和对应的 typed result；不要从旧 Guide 推断新增或可选字段。
 
 ## 输出

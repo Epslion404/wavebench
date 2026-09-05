@@ -1076,6 +1076,14 @@ def _main(argv: list[str] | None = None) -> int:
                 refresh_interval_s=args.refresh_interval,
                 log_path=args.log_file,
             )
+        if args.domain == "analysis":
+            from .services.analysis_service import check_analysis, run_analysis
+
+            options = dict(capture=Path(args.capture), channel=args.channel, recipe=Path(args.recipe))
+            result = (run_analysis(**options, output=Path(args.output))
+                      if args.command == "run" else check_analysis(**options))
+            print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
+            return 0 if result["status"] == "ok" else 1
         if args.domain == "capture":
             if args.command == "inspect":
                 package = load_capture_package(args.path)

@@ -43,6 +43,15 @@ def build_parser() -> argparse.ArgumentParser:
     sweep_parser = subparsers.add_parser("sweep", help="Source/scope sweep commands")
     run_parser = subparsers.add_parser("run", help="Multi-instrument run plan commands")
     capture_parser = subparsers.add_parser("capture", help="Offline capture package commands")
+    analysis_parser = subparsers.add_parser("analysis", help="Offline signal processing")
+    analysis_sub = analysis_parser.add_subparsers(dest="command", required=True)
+    for command in ("check", "run"):
+        analysis_command = analysis_sub.add_parser(command)
+        analysis_command.add_argument("--capture", required=True)
+        analysis_command.add_argument("--channel", type=int, required=True)
+        analysis_command.add_argument("--recipe", required=True)
+        if command == "run":
+            analysis_command.add_argument("--output", required=True)
     mcp_parser = subparsers.add_parser("mcp", help="HTTP MCP server / HTTP MCP 服务")
     tui_parser = subparsers.add_parser("tui", help="Launch terminal UI / 启动终端界面")
     net_parser = subparsers.add_parser("net", help="Network discovery helpers / 网络发现工具")

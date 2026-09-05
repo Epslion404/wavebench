@@ -1,5 +1,16 @@
 # run plan Reference
 
+## 独立离线配方
+
+`analysis` 命令直接处理历史 capture package，不需要仪器配置。显式选择一个通道，配方只包含 `schema = "wavebench.analysis_recipe.v1"`、`operations` 和可选 `[expect]`，共用下文的算子与验收合同。示例为 `plans/example_analysis_recipe.toml`。
+
+```bash
+wavebench analysis check --capture data/capture --channel 1 --recipe plans/example_analysis_recipe.toml
+wavebench analysis run --capture data/capture --channel 1 --recipe plans/example_analysis_recipe.toml --output data/analysis_trial_1
+```
+
+输出必须是新的独立目录，不能位于来源 capture package 或既有 run 内。再次分析应使用另一个输出目录。来源读取或算子失败写入分析产物；配置和输出目录不合法时在执行前拒绝。验收失败时命令返回非零状态。
+
 本页说明如何查询 WaveBench 当前支持的 run plan 结构。完整的 step、必填字段、可选字段和简要行为由离线命令生成，不在 Guide 中复制维护。
 
 ## Synopsis

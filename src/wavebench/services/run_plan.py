@@ -1273,6 +1273,10 @@ def _normalize_analysis_pipeline_fields(prefix: str, fields: dict[str, Any]) -> 
     fields["source"] = {
         "step": _normalize_step_id(source["step"], f"{prefix}.source.step")
     }
+    normalize_analysis_operations(prefix, fields)
+
+
+def normalize_analysis_operations(prefix: str, fields: dict[str, Any]) -> None:
 
     raw_operations = fields["operations"]
     if not isinstance(raw_operations, list) or not raw_operations:
