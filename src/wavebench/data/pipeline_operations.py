@@ -61,6 +61,68 @@ def normalize_peaks(operation: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def normalize_smooth(operation: dict[str, Any]) -> dict[str, Any]:
+    method = operation["method"]
+    if method not in ("moving_average", "savgol"):
+        raise DataError("smooth method must be moving_average or savgol")
+    length = integer(operation["window_length"], "window_length", 3, 1001)
+    if length % 2 == 0:
+        raise DataError("smooth window_length must be odd")
+    mode, boundary = operation["mode"], operation["boundary"]
+    if mode not in ("centered", "causal") or boundary not in ("reflect", "edge"):
+        raise DataError("smooth requires mode=centered|causal and boundary=reflect|edge")
+    if mode == "causal" and boundary != "edge":
+        raise DataError("causal smooth requires edge boundary; reflection uses future samples")
+    result = dict(op="smooth", method=method, window_length=length, mode=mode, boundary=boundary)
+    if method == "savgol":
+        if "polyorder" not in operation:
+            raise DataError("savgol requires polyorder")
+        result["polyorder"] = integer(operation["polyorder"], "polyorder", 0, min(5, length-1))
+    elif "polyorder" in operation:
+        raise DataError("moving_average does not accept polyorder")
+    return result
+
+
+def smooth_signal(signal: TimeSignal, operation: dict[str, Any]) -> tuple[TimeSignal, dict]:
+    operation = normalize_smooth(operation)
+    if signal.window_name is not None or signal.coherent_gain != 1:
+        raise DataError("smooth must precede the whole-signal window")
+    interval_s = _uniform_sample_interval(signal, "smooth")
+    sample_rate = 1 / interval_s
+    if not np.isfinite(sample_rate):
+        raise DataError("smooth requires a finite sample rate")
+    length = operation["window_length"]
+    if len(signal.voltage_v) < length:
+        raise DataError("smooth requires at least window_length samples")
+    causal = operation["mode"] == "causal"
+    left, right = (length-1, 0) if causal else (length//2, length//2)
+    metadata = {
+        **operation, "sample_rate_hz": sample_rate,
+        "boundary_left_samples": left, "boundary_right_samples": right,
+        "time_shift_applied_s": 0,
+    }
+    if operation["method"] == "moving_average":
+        coefficients = np.ones(length) / length
+        metadata["nominal_group_delay_samples"] = (length - 1) / 2 if causal else 0
+        metadata["nominal_group_delay_s"] = metadata["nominal_group_delay_samples"] * interval_s
+    else:
+        from scipy import __version__ as scipy_version
+        from scipy.signal import savgol_coeffs
+
+        position = length-1 if causal else length//2
+        coefficients = savgol_coeffs(length, operation["polyorder"], deriv=0, pos=position, use="conv")
+        if not np.all(np.isfinite(coefficients)) or not np.isclose(np.sum(coefficients), 1, rtol=1e-6, atol=1e-9):
+            raise DataError("savgol coefficients fail constant-gain validation; reduce window or order")
+        metadata.update({"scipy_version": scipy_version, "evaluation_position": position,
+                         "nominal_group_delay_samples": None if causal else 0})
+    metadata["coefficients_sha256"] = sha256(np.asarray(coefficients, dtype="<f8").tobytes()).hexdigest()
+    padded = np.pad(signal.voltage_v, (left, right), mode=operation["boundary"])
+    voltage = np.convolve(padded, coefficients, mode="valid")
+    if not np.all(np.isfinite(voltage)):
+        raise DataError("smooth output must be finite")
+    return TimeSignal(signal.time_s.copy(), voltage), metadata
+
+
 def detect_peaks(signal: TimeSignal | FrequencySignal | PsdSignal, operation: dict[str, Any]) -> dict:
     operation = normalize_peaks(operation)
     if isinstance(signal, TimeSignal):

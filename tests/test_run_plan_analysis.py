@@ -179,7 +179,7 @@ duration_s = 0.1
         cases = {
             "operations must be a non-empty array": "",
             "operation must be a TOML table": '"remove_dc"',
-            "unsupported op": '{ op = "smooth" }',
+            "unsupported op": '{ op = "python_callback" }',
             "unknown field 'method'": '{ op = "remove_dc", method = "linear" }',
             "method must be 'linear'": '{ op = "detrend", method = "constant" }',
             "name must be one of": '{ op = "window", name = "bartlett" }',

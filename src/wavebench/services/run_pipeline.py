@@ -29,7 +29,7 @@ from wavebench.data.signal_pipeline import (
     welch_psd,
 )
 from wavebench.errors import ConfigError, DataError, error_envelope
-from wavebench.data.pipeline_operations import measure_band, detect_peaks
+from wavebench.data.pipeline_operations import measure_band, detect_peaks, smooth_signal
 from wavebench.services.run_analysis import evaluate_expect
 from wavebench.services.run_artifacts import RunStepRecord
 from wavebench.services.run_plan import RunPlan, RunStep
@@ -52,12 +52,15 @@ def ensure_operation_dependencies(all_operations: list[dict[str, Any]]) -> None:
         operation
         for operation in all_operations
         if operation["op"] in {"filter", "psd", "peaks"}
+        or operation["op"] == "smooth" and operation["method"] == "savgol"
     ]
     if not operations:
         return
     required_functions: set[str] = set()
     for operation in operations:
-        if operation["op"] == "peaks":
+        if operation["op"] == "smooth":
+            required_functions.add("savgol_coeffs")
+        elif operation["op"] == "peaks":
             required_functions.add("find_peaks")
         elif operation["op"] == "psd":
             required_functions.update({"welch", "get_window"})
@@ -145,6 +148,7 @@ def execute_pipeline(
     stages: list[dict[str, Any]] = []
     filters: list[dict[str, Any]] = []
     peaks: list[dict[str, Any]] = []
+    transformations: list[dict[str, Any]] = []
     sampling: dict[str, Any] | None = None
     window: dict[str, Any] | None = None
     psd: dict[str, Any] | None = None
@@ -174,6 +178,12 @@ def execute_pipeline(
                 elif op == "detrend":
                     assert isinstance(signal, TimeSignal)
                     signal = detrend_linear(signal)
+                elif op == "smooth":
+                    assert isinstance(signal, TimeSignal)
+                    signal, metadata = smooth_signal(signal, operation)
+                    metadata["operation_index"] = operation_index
+                    stage["transformation"] = metadata
+                    transformations.append(metadata)
                 elif op == "filter":
                     assert isinstance(signal, TimeSignal)
                     if operation["family"] == "fir":
@@ -380,6 +390,8 @@ def execute_pipeline(
         manifest["psd"] = psd
     if peaks:
         manifest["peaks"] = peaks
+    if transformations:
+        manifest["transformations"] = transformations
     if failed_stage is not None:
         manifest["failed_stage"] = failed_stage
     if failure is not None:

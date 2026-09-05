@@ -82,6 +82,7 @@ thd_ratio = { max = 0.05 }
 | `remove_dc` | 无 | 时域 → 时域 |
 | `detrend` | `method = "linear"` | 时域 → 时域 |
 | `filter` | FIR 或 IIR 的判别式设计参数 | 时域 → 时域 |
+| `smooth` | 方法、奇数窗口长度、模式和边界，见下文 | 时域 → 时域 |
 | `window` | `name = "hann|hamming|blackman"` | 时域 → 时域 |
 | `fft` | 无 | 时域 → 频域 |
 | `psd` | Welch 分段参数，见下文 | 时域 → PSD |
@@ -91,6 +92,19 @@ thd_ratio = { max = 0.05 }
 | `export` | 安全的 `name`；`formats` 为 `npy`、`csv` 的非空子集 | 导出当前域，不改变数据 |
 
 `remove_dc`、`detrend`、`window` 和 `fft` 各至多出现一次；`remove_dc` 与 `detrend` 互斥。`filter` 可以重复，从而按声明顺序串联多个 FIR／IIR stage。去直流、去趋势和滤波必须位于窗口之前，所有时域变换必须位于 FFT 之前。测量指标和导出名称在同一流水线内不得重复，流水线至少包含一个 `measure` 或 `export`。
+
+### 时域平滑
+
+```toml
+{ op = "smooth", method = "moving_average", window_length = 5, mode = "causal", boundary = "edge" }
+{ op = "smooth", method = "savgol", window_length = 11, polyorder = 2, mode = "centered", boundary = "reflect" }
+```
+
+`method`、`window_length`、`mode` 和 `boundary` 必填。窗口为 3～1001 的奇数，输入必须等间隔且长度不小于窗口。`savgol` 另需 `polyorder`，为 0～5 且小于窗口长度的整数；移动平均不接受该字段。平滑必须在整段 window、FFT 和 PSD 之前，可串联多个 stage。
+
+`centered` 使用左右等长窗口，边界可选 `reflect`（不重复端点的反射）或 `edge`（首末值延拓）。`causal` 仅使用当前及过去样本，起始处只允许 `edge`，不允许引入未来样本的反射。输出样本数和时间轴不变，不自动补偿延迟。
+
+移动平均各点等权；因果模式名义群延迟为 `(window_length - 1) / 2` 个样本。Savitzky–Golay 使用零阶导数系数，居中模式在窗口中点评价，因果模式在末点评价；因果模式不声明固定群延迟。系数非有限或常量增益校验失败时明确失败，不静默修正。移动平均仅使用 NumPy，Savitzky–Golay 按需检查 SciPy 的 `savgol_coeffs`。
 
 ### FIR 滤波
 
