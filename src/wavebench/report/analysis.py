@@ -125,8 +125,11 @@ def read_curve(path: Path, item: dict, column: int, limits: AnalysisLimits):
             if hash_stream(file) != item["sha256"]:
                 raise ValueError("export SHA-256 mismatch")
             return consume((data[i:i+BLOCK_ROWS] for i in range(0, len(data), BLOCK_ROWS)), len(data))
+    path_before = file_identity(path.stat())
     with path.open("rb") as file:
         before = file_identity(os.fstat(file.fileno()))
+        if path_before != file_identity(path.stat()):
+            raise ValueError("export changed while being opened")
         limits.check("max_output_bytes", before[2], "report input")
         if hash_stream(file) != item["sha256"]:
             raise ValueError("export SHA-256 mismatch")
@@ -157,7 +160,7 @@ def read_curve(path: Path, item: dict, column: int, limits: AnalysisLimits):
             if block:
                 yield np.asarray(block)
         result = consume(blocks(), count)
-        if before != file_identity(os.fstat(file.fileno())) or before != file_identity(path.stat()):
+        if before != file_identity(os.fstat(file.fileno())) or path_before != file_identity(path.stat()):
             raise ValueError("export changed during report generation")
         return result
 

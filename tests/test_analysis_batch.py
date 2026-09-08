@@ -105,3 +105,17 @@ def test_batch_continue_source_failure_and_report(tmp_path, analysis_input):
     assert [item['status'] for item in result['entries']]==['failed','ok']
     html=write_analysis_report([tmp_path/'results'],tmp_path/'report.html').read_text()
     assert 'polyline' in html
+
+
+def test_inventory_never_reads_active_lock(tmp_path, monkeypatch):
+    from wavebench.services import analysis_batch
+    from wavebench.data.analysis_resources import AnalysisLimits
+    (tmp_path / '.batch.lock').write_bytes(b'locked')
+    artifact = tmp_path / 'result.json'
+    artifact.write_text('{}')
+    original = analysis_batch._sha256_file
+    def hash_file(path):
+        assert path.name != '.batch.lock', 'cannot read a Windows locked file'
+        return original(path)
+    monkeypatch.setattr(analysis_batch, '_sha256_file', hash_file)
+    assert set(analysis_batch._inventory(tmp_path, AnalysisLimits())) == {'result.json'}

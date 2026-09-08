@@ -20,6 +20,8 @@ BLOCK_ROWS = 4096
 
 
 def file_identity(stat):
+    # Compare snapshots made by the same API: Windows stat and fstat may use
+    # different file-ID representations (notably in Python 3.12).
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
@@ -36,8 +38,11 @@ def read_json_bounded(path: Path, limits: AnalysisLimits):
 def mapped_npy(path: Path, limits: AnalysisLimits, *, columns: int, source: bool = False):
     """Validate a bounded header and file size before mapping, then pin the opened inode."""
     array = None
+    path_before = file_identity(path.stat())
     with path.open("rb") as file:
         before = file_identity(os.fstat(file.fileno()))
+        if path_before != file_identity(path.stat()):
+            raise DataError("analysis source changed while being opened")
         prefix = file.read(8)
         if len(prefix) != 8 or prefix[:6] != b"\x93NUMPY" or prefix[6:] not in (b"\x01\x00", b"\x02\x00", b"\x03\x00"):
             raise DataError("invalid or unsupported NPY header")
@@ -74,7 +79,7 @@ def mapped_npy(path: Path, limits: AnalysisLimits, *, columns: int, source: bool
             array = np.memmap(file, dtype=dtype, mode="r", offset=offset, shape=shape,
                               order="F" if order else "C")
             yield array, file
-            if before != file_identity(os.fstat(file.fileno())) or before != file_identity(path.stat()):
+            if before != file_identity(os.fstat(file.fileno())) or path_before != file_identity(path.stat()):
                 raise DataError("analysis source changed while being read")
         finally:
             if array is not None:

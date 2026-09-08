@@ -77,6 +77,8 @@ def _inventory(root, limits):
         for path in sorted(root.rglob('*')):
             if path.is_symlink():
                 raise ConfigError('batch results must not contain symlinks')
+            if path == root / '.batch.lock':
+                continue  # Windows denies reading the active lock through another handle.
             if path.is_file():
                 limits.check('max_output_files', len(files) + 1, 'batch inventory')
                 files[path.relative_to(root).as_posix()] = {'bytes': path.stat().st_size, 'sha256': _sha256_file(path)}

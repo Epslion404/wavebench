@@ -246,3 +246,30 @@ def test_report_curve_limit_is_warning(tmp_path, analysis_input):
                                  resource_limits=replace(AnalysisLimits(), max_report_curves=1)).read_text()
     assert html.count("<polyline") == 1
     assert "max_report_curves" in html
+
+
+@pytest.mark.parametrize("file_format", ["npy", "csv"])
+def test_file_and_path_stat_can_have_different_ids(tmp_path, monkeypatch, file_format):
+    import os
+    from wavebench.report.analysis import read_curve
+    # Python's Windows stat/fstat may report different identities for one file.
+    original = os.fstat
+    class DescriptorStat:
+        def __init__(self, value):
+            self.value = value
+        def __getattr__(self, name):
+            if name in {"st_dev", "st_ino"}:
+                return 0
+            return getattr(self.value, name)
+    monkeypatch.setattr(os, "fstat", lambda fd: DescriptorStat(original(fd)))
+    values = np.column_stack((np.arange(16.), np.ones(16)))
+    path = tmp_path / f"signal.{file_format}"
+    if file_format == "npy":
+        np.save(path, values)
+        loaded, _ = load_waveform(path, AnalysisLimits())
+        np.testing.assert_array_equal(loaded.as_array(), values)
+    else:
+        _atomic_write_csv(path, ["time_s", "voltage_v"], values)
+    item = {"format": file_format, "path": path.name, "sha256": sha256(path.read_bytes()).hexdigest(),
+            "domain": "time", "columns": ["time_s", "voltage_v"]}
+    read_curve(path, item, 1, AnalysisLimits())

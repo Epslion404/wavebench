@@ -8,7 +8,7 @@
 
 ## 高级谱质量估计
 
-本节及下文批量／双通道接口为开发分支已实现、尚未发布的合同。`spectral_quality` 只接受 mean Welch PSD，沿用命名指标与 `[expect]`。完整配方见 `plans/example_spectral_quality.toml`；每个字段均显式声明。
+`spectral_quality` 只接受 mean Welch PSD，沿用命名指标与 `[expect]`。完整配方见 `plans/example_spectral_quality.toml`；每个字段均显式声明。
 
 | 字段 | 合同 |
 | --- | --- |
@@ -68,7 +68,7 @@ transfer 至少需要两个完整 Welch 段，固定 mean，并共用两路分�
 
 ## 分析进程监督
 
-本节为开发分支已实现、尚未发布的执行合同。`analysis check/run` 与 `run check/intent/verify/plan` 接受 `--analysis-execution <toml>`，文件使用 `wavebench.analysis_execution.v1`。示例见 `plans/example_analysis_execution.toml`。
+`analysis check/run` 与 `run check/intent/verify/plan` 接受 `--analysis-execution <toml>`，文件使用 `wavebench.analysis_execution.v1`。示例见 `plans/example_analysis_execution.toml`。
 
 | 字段 | 默认值 | 含义 |
 | --- | --- | --- |
@@ -85,7 +85,7 @@ Windows 硬限额使用 Job Object 的 job committed memory；Linux 使用 cgrou
 
 ## 分析资源预算
 
-本节为开发分支已实现、尚未发布的资源合同。分析使用有限的默认预算；超限时拒绝执行，不自动降低 taps、FFT 长度或采样率。旧的极大配方可能因此失败，正常预算内的数值参数与结果保持原样。
+分析使用有限的默认预算；超限时拒绝执行，不自动降低 taps、FFT 长度或采样率。旧的极大配方可能因此失败，正常预算内的数值参数与结果保持原样。
 
 资源文件独立于仪器配置，以 `schema = "wavebench.analysis_resources.v1"` 开头，随后是限额字段。`--analysis-resources <file.toml>` 可用于 `analysis check/run/report` 和 `run check/intent/verify/plan/report`。未提供的字段沿用默认值。独立离线分析仍不需要 `wavebench.toml`。
 
