@@ -2,6 +2,14 @@
 
 ## 独立离线分析
 
+分析 manifest 的 `resources` 记录 `wavebench.analysis_resources.v1`、估算器 `conservative.v1`、有效限额、累计工作量，以及写入最终 metadata 前的派生数据字节／文件数。每个实际执行阶段的 `resources` 记录该阶段工作集与运算量估算。缺少这些字段的旧产物仍可读取。
+
+NPY 来源先检查有界 header、实数 dtype、二维形状和文件长度，再只读映射；验证按块完成，跨块时间轴同样检查。处理结果使用独立工作数组，原始映射不写入。来源摘要使用同一打开文件计算，检测到文件替换或元数据变化时拒绝；这不是文件系统快照，不能保证识别所有外部并发修改。
+
+时域／频域 NPY 与 CSV 按 4096 行块组装和原子写出，保持既有列、行序、浮点文本及文件摘要。报告按块验证全部数据与指纹，仅保存不超过 1200 个显示点；CSV 不再全量载入。预算不足或坏文件显示警告，仍可展示其它可用曲线。
+
+默认环境继续生成 `wavebench.execution_intent.v1`，旧 Plan 的 digest 不变。显式 `--analysis-resources` 使用 `wavebench.execution_intent.v2`，把完整有效环境限额及估算器版本写入 `analysis_resources` 并绑定摘要，验证时必须提供同一资源配置。任务级收紧字段本身属于 Plan／配方内容，随既有摘要覆盖。默认 v1 不承诺绑定跨版本的默认预算。
+
 成功重采样也写入 `transformations` 和 stage 的 `transformation`，记录约分比例、输入／输出样本数、采样率、间隔、时间范围、输出长度规则、固定滤波器 tap 数与截止频率、设计采样率、系数摘要、SciPy 版本和边界规则。manifest 的 `sampling` 随重采样更新，后续算子记录实际使用的新采样率。
 
 成功平滑时，manifest 条件性增加 `transformations`，对应 stage 记录同一份 `transformation`。其中包括规范化参数、实际采样率、左右边界影响样本数、系数摘要、时间轴是否平移、可定义的名义群延迟；Savitzky–Golay 另外记录 SciPy 版本和窗口评价位置。未执行成功时不增加该项，后续失败保留此前的变换记录。

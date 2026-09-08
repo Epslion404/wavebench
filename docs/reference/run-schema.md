@@ -2,7 +2,41 @@
 
 ## 独立离线配方
 
-`analysis` 命令直接处理历史 capture package，不需要仪器配置。显式选择一个通道，配方只包含 `schema = "wavebench.analysis_recipe.v1"`、`operations` 和可选 `[expect]`，共用下文的算子与验收合同。示例为 `plans/example_analysis_recipe.toml`。
+`analysis` 命令直接处理历史 capture package，不需要仪器配置。显式选择一个通道，配方包含 `schema = "wavebench.analysis_recipe.v1"`、`operations` 和可选 `[expect]`／`[resources]`，共用下文的算子与验收合同。示例为 `plans/example_analysis_recipe.toml`。
+
+## 分析资源预算
+
+本节为开发分支已实现、尚未发布的资源合同。分析使用有限的默认预算；超限时拒绝执行，不自动降低 taps、FFT 长度或采样率。旧的极大配方可能因此失败，正常预算内的数值参数与结果保持原样。
+
+资源文件独立于仪器配置，以 `schema = "wavebench.analysis_resources.v1"` 开头，随后是限额字段。`--analysis-resources <file.toml>` 可用于 `analysis check/run/report` 和 `run check/intent/verify/plan/report`。未提供的字段沿用默认值。独立离线分析仍不需要 `wavebench.toml`。
+
+| 字段 | 默认值 | 含义 |
+| --- | --- | --- |
+| `max_working_bytes` | 536870912 | 估算工作集，512 MiB |
+| `max_input_samples` | 20000000 | 来源或重采样后的样本数 |
+| `max_fft_length` | 1048576 | FFT／PSD FFT 长度 |
+| `max_fir_taps` | 4095 | FIR taps |
+| `max_zero_phase_fir_taps` | 255 | 零相位 FIR taps，同时受上一项约束 |
+| `max_work_units` | 2000000000 | 累计运算量估算，不代表秒数 |
+| `max_output_bytes` | 1073741824 | 每条分析输出总字节；报告用于累计导出读取及报告输出 |
+| `max_temp_bytes` | 1073741824 | 当前临时输出文件字节 |
+| `max_peak_candidates` | 100000 | 峰候选最坏数量／报告标记累计数量 |
+| `max_report_curves` | 32 | 单份信号处理报告曲线数 |
+| `max_operations` | 128 | 每条处理链算子数量 |
+| `max_output_files` | 256 | 分析文件数；独立报告来源目录数 |
+| `max_metadata_bytes` | 8388608 | 单个配方／元数据文档字节 |
+
+所有限额是 1～`2^63-1` 的整数，不接受布尔值或无限值。环境资源文件可以明确提高预算；配方 `[resources]` 和分析 step 的 `[steps.resources]` 只能收紧有效环境值，提高时拒绝配置。资源文件示例见 `plans/example_analysis_resources.toml`。
+
+`run check` 在硬件会话之前检查操作数量、FIR taps、PSD `nfft` 和文件数量。实际采集长度此时未知，因此不能把静态通过视为全部资源检查通过。独立 `analysis check` 读取受限 NPY header、校验实际波形，并按重采样后的长度推演处理链。实际执行仍逐阶段检查，以保留此前成功导出和准确失败位置。
+
+工作集估算计入数组副本、滤波器、PSD 重叠分段及复数工作区；运算量按 FIR 的样本数乘 taps、Welch 的段数乘 FFT 长度及对数阶等保守模型累计。峰检测在创建候选属性前按最坏峰数准入，平坦的大波形也可能被拒绝。mean／median Welch 都保守预算分段矩阵，本版本没有增加分段计算后端。
+
+预算范围是单个分析 step／独立分析目录；多个 RunPlan 分析 step 串行执行，各自计账，尚无整个 run 的磁盘总配额。已有重采样比例、样本数等算子固有限制仍有效，资源文件不能解除它们。
+
+超限错误为 `resource_limit_exceeded`，包含维度、限额、请求量和阶段。已开始的分析按 `on_failure` 处理，不重采集；当前临时文件清理，已完成文件保留。诊断 metadata 在配额耗尽后仍尽力写入并标记失败，这部分可能超过输出配额；磁盘完全耗尽时不保证诊断落成。
+
+资源预算是保守准入估算，不是操作系统 RSS 硬限制或不可信代码沙箱。不同 SciPy／NumPy 版本的内部工作集可能不同；未知规模应先做受控基准。常规 `run report` 的资源选项只约束信号处理曲线区域，不覆盖旧截图、PDF 或频响报告的全部资源。
 
 ```bash
 wavebench analysis check --capture data/capture --channel 1 --recipe plans/example_analysis_recipe.toml
