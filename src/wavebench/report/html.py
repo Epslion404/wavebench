@@ -1975,7 +1975,7 @@ def _build_evidence_summary(
 def _signal_processing_block(run: RunPackage, output_dir: Path, *, analysis_limits=None) -> str:
     rows: list[str] = []
     for step in run.steps:
-        if step.get("kind") != "analysis.pipeline":
+        if step.get("kind") not in {"analysis.pipeline", "analysis.pair"}:
             continue
         artifact = step.get("artifact", {}) if isinstance(step.get("artifact"), dict) else {}
         pipeline = (
@@ -2040,7 +2040,7 @@ def _signal_processing_block(run: RunPackage, output_dir: Path, *, analysis_limi
 
     curves = render_analysis_sections([
         (run.path, str(step.get("id", step["index"])), step.get("artifact", {}))
-        for step in run.steps if step.get("kind") == "analysis.pipeline"
+        for step in run.steps if step.get("kind") in {"analysis.pipeline", "analysis.pair"}
     ], details=False, resource_limits=analysis_limits)
     return f"""<h2>信号处理 / Signal processing</h2>
 <div class="table compact-table"><table>
@@ -2098,7 +2098,7 @@ def _analysis_file_link(
 def _analysis_manifest_entries(run: RunPackage, output_dir: Path) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for step in run.steps:
-        if step.get("kind") != "analysis.pipeline":
+        if step.get("kind") not in {"analysis.pipeline", "analysis.pair"}:
             continue
         artifact = step.get("artifact", {}) if isinstance(step.get("artifact"), dict) else {}
         pipeline = (
@@ -2271,7 +2271,7 @@ def _collect_artifact_links(
                 )
             )
     for step in run.steps:
-        if step.get("kind") != "analysis.pipeline":
+        if step.get("kind") not in {"analysis.pipeline", "analysis.pair"}:
             continue
         artifact = step.get("artifact", {}) if isinstance(step.get("artifact"), dict) else {}
         pipeline = (

@@ -321,6 +321,12 @@ class RunService:
             if step.kind == "analysis.pipeline":
                 limits = (self.analysis_limits or AnalysisLimits()).tighten(step.fields.get("resources"))
                 check_static(step.fields["operations"], limits)
+            elif step.kind == "analysis.pair":
+                from .pair_service import ensure_pair_dependencies
+                from wavebench.data.pair_analysis import check_pair_static
+                limits = (self.analysis_limits or AnalysisLimits()).tighten(step.fields.get("resources"))
+                check_pair_static(step.fields["operations"], limits)
+                ensure_pair_dependencies()
         check_run_plan_safety_limits(plan, self.config.safety_limits)
         reject_unsupported_steps(plan)
         ensure_analysis_pipeline_dependencies(plan)
@@ -724,7 +730,7 @@ class RunService:
         if execution_intent is not None:
             intent = verify_execution_intent(execution_intent, plan, self.config, resource_limits=self.analysis_limits, execution_policy=self.analysis_execution)
         plan_hash = intent.plan_digest
-        analysis_steps = [step for step in plan.steps if step.kind == "analysis.pipeline"]
+        analysis_steps = [step for step in plan.steps if step.kind in {"analysis.pipeline", "analysis.pair"}]
         hardware_steps = plan.steps[: len(plan.steps) - len(analysis_steps)]
         with self._run_instrument_lifecycle(plan) as services:
             self._run_safety_guards(plan, services=services)
@@ -1115,7 +1121,11 @@ class RunService:
                 source_step = source_steps[step.fields["source"]["step"]]
                 source_record = source_records.get(source_step.index)
                 try:
-                    artifact = execute_analysis_pipeline(
+                    executor = execute_analysis_pipeline
+                    if step.kind == "analysis.pair":
+                        from .pair_service import execute_pair_step
+                        executor = execute_pair_step
+                    artifact = executor(
                         run_dir=run_dir,
                         step=step,
                         source_step=source_step,

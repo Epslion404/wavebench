@@ -37,6 +37,17 @@ def artifact_file(root: Path, raw: str) -> Path:
 def analysis_entries(root: Path, resource_limits: AnalysisLimits | None = None) -> list[tuple[Path, str, dict[str, Any]]]:
     limits = resource_limits or AnalysisLimits()
     try:
+        if (root / "batch.json").is_file():
+            from wavebench.services.analysis_batch import _safe_attempt
+            batch = read_json_bounded(root / "batch.json", limits)
+            limits.check("max_output_files", len(batch["entries"]), "batch report")
+            entries = []
+            for item in batch["entries"]:
+                if item.get("directory"):
+                    directory = _safe_attempt(root, item["directory"])
+                    if (directory / "analysis.json").is_file():
+                        entries.extend(analysis_entries(directory, limits))
+            return entries
         if (root / "analysis.json").is_file():
             result = read_json_bounded(root / "analysis.json", limits)
             if result["schema"] != "wavebench.analysis.v1":
@@ -44,7 +55,7 @@ def analysis_entries(root: Path, resource_limits: AnalysisLimits | None = None) 
             return [(root, root.name, result["artifact"])]
         run = read_json_bounded(root / "run.json", limits)
         return [(root, f"{root.name}/{step.get('id', step['index'])}", step["artifact"])
-                for step in run["steps"] if step["kind"] == "analysis.pipeline"]
+                for step in run["steps"] if step["kind"] in {"analysis.pipeline", "analysis.pair"}]
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise ConfigError(f"cannot read analysis results in {root}: {exc}") from exc
 
@@ -207,8 +218,18 @@ def render_analysis_sections(entries: list[tuple[Path, str, dict[str, Any]]], *,
                     + '; timeout_s=' + escape(str(execution.get('timeout_s')))
                     + '; memory_backend=' + escape(str(execution.get('memory_backend')))
                     + '; forced=' + escape(str(execution.get('forced'))) + '</p>')
+            for stage in manifest.get("stages", []):
+                measurement = stage.get("measurement", {})
+                if measurement.get("schema") == "wavebench.spectral_quality.v1":
+                    sections.append('<details><summary>PSD 积分质量估计 / Spectral quality</summary><pre>'
+                                    + escape(json.dumps(measurement, ensure_ascii=False, indent=2)) + '</pre></details>')
             source = manifest["source"]
             peak_sets = {}
+            if manifest.get("schema") == "wavebench.analysis_pair.v1":
+                curve_count += 3 * sum(item.get("format") == "npy" for item in manifest.get("exports", []))
+                limits.check("max_report_curves", curve_count, "pair report")
+                sections.append(render_pair_curves(root, manifest, limits))
+                continue
             for peak in manifest.get("peaks", []):
                 try:
                     peak_file = artifact_file(root, peak["json"])
@@ -263,7 +284,8 @@ def write_analysis_report(paths: list[Path], output: Path, *, resource_limits: A
     limits.check("max_output_files", len(paths), "report inputs")
     metadata_bytes = 0
     for root in paths:
-        document = root / ("analysis.json" if (root / "analysis.json").is_file() else "run.json")
+        document = root / ("batch.json" if (root / "batch.json").is_file() else
+                           "analysis.json" if (root / "analysis.json").is_file() else "run.json")
         try:
             metadata_bytes += document.stat().st_size
         except OSError as exc:
@@ -290,3 +312,76 @@ def write_analysis_report(paths: list[Path], output: Path, *, resource_limits: A
     output.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_bytes(output, html.encode("utf-8"), budget=AnalysisBudget(limits))
     return output
+
+
+def render_pair_curves(root, manifest, limits):
+    """Validate all pair bins while retaining bounded per-bucket extrema and gap flags."""
+    from wavebench.data.pair_analysis import PAIR_COLUMNS
+    exports = [item for item in manifest.get('exports', []) if item.get('format') == 'npy']
+    sections = ['<h3>双通道分析 / Pair analysis</h3><p>同步证据 / Synchronization: '
+                + escape(str(manifest.get('source', {}).get('synchronization', {}).get('kind', 'unavailable')))
+                + ' · measurement-chain delay; no deskew calibration</p>']
+    used = 0
+    for item in exports:
+        limits.check('max_report_curves', 3 * (used+1), 'pair report')
+        path = artifact_file(root, item['path'])
+        if item.get('columns') != PAIR_COLUMNS or _sha256_file(path) != item['sha256']:
+            raise ValueError('pair export columns or SHA-256 mismatch')
+        buckets = [{}, {}, {}]
+        counts = {'valid': 0, 'coherent': 0, 'total': 0}
+        previous = None
+        with mapped_npy(path, limits, columns=8) as (data, _):
+            limits.check('max_working_bytes', 4096*128 + 600*1024, 'pair report')
+            for start in range(0, len(data), 4096):
+                block = np.asarray(data[start:start+4096])
+                if (not np.all(np.isfinite(block[:, 0])) or not np.all(np.diff(block[:, 0]) > 0)
+                        or previous is not None and block[0, 0] <= previous
+                        or not np.all(np.isin(block[:, 6:], [0, 1]))):
+                    raise ValueError('invalid pair frequency axis or masks')
+                previous = block[-1, 0]
+                valid = block[:, 6].astype(bool)
+                if (not np.all(np.isfinite(block[valid, 1:6])) or not np.all(np.isnan(block[~valid, 1:6]))
+                        or np.any(block[:, 7] > block[:, 6]) or np.any((block[valid, 5] < 0) | (block[valid, 5] > 1))):
+                    raise ValueError('invalid pair numeric values or coherence')
+                counts['total'] += len(block)
+                counts['valid'] += int(valid.sum())
+                counts['coherent'] += int(block[:, 7].sum())
+                indices = (np.arange(start, start+len(block))*600//len(data)).astype(int)
+                for bucket in np.unique(indices):
+                    selected = block[indices == bucket]
+                    for which, column in enumerate((3, 4, 5)):
+                        current = buckets[which].setdefault(int(bucket), {'gap': False, 'min': None, 'max': None})
+                        current['gap'] |= bool(np.any(selected[:, 6] == 0))
+                        values = selected[selected[:, 6] == 1]
+                        if not len(values):
+                            continue
+                        lo, hi = values[np.argmin(values[:, column])], values[np.argmax(values[:, column])]
+                        for key, row in (('min', lo), ('max', hi)):
+                            point = (float(row[0]), float(row[column]))
+                            old = current[key]
+                            if old is None or (point[1] < old[1] if key == 'min' else point[1] > old[1]):
+                                current[key] = point
+        sections.append('<p>有效 bin / Valid bins: ' + escape(str(counts)) + '</p>')
+        for label, table in zip(('Gain (dB)', 'Phase (rad)', 'Coherence'), buckets):
+            points = [p for entry in table.values() for p in (entry['min'], entry['max']) if p]
+            if not points:
+                continue
+            xmin, xmax = min(p[0] for p in points), max(p[0] for p in points)
+            ymin, ymax = min(p[1] for p in points), max(p[1] for p in points)
+            commands, connected = [], False
+            for _, entry in sorted(table.items()):
+                if entry['gap'] or entry['min'] is None:
+                    connected = False
+                    continue
+                for x, y in sorted({entry['min'], entry['max']}):
+                    px = 50 + 800*(x-xmin)/(xmax-xmin or 1)
+                    py = 250 - 210*(y-ymin)/(ymax-ymin or 1)
+                    commands.append(f"{'L' if connected else 'M'}{px:.2f},{py:.2f}")
+                    connected = True
+            sections.append(f'<h4>{label}</h4><svg viewBox="0 0 900 290" role="img" aria-label="{label}">'
+                f'<path d="{" ".join(commands)}" fill="none" stroke="#2563eb"/>'
+                f'<text x="50" y="280">{xmin:.5g}–{xmax:.5g} Hz; {ymin:.5g}–{ymax:.5g}</text></svg>')
+        used += 1
+    if not exports:
+        sections.append('<p>No NPY pair curves / 无 NPY 双通道曲线；CSV 可从导出链接下载</p>')
+    return ''.join(sections)

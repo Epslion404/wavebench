@@ -98,11 +98,15 @@ def check_analysis(capture: Path, channel: int, recipe: Path, *, resource_limits
             **({"execution": execution_policy.evidence()} if execution_policy is not None else {})}
 
 
-def run_analysis(capture: Path, channel: int, recipe: Path, output: Path, *, resource_limits: AnalysisLimits | None = None, execution_policy=None, cancel_event=None) -> dict[str, Any]:
+def run_analysis(capture: Path, channel: int, recipe: Path, output: Path, *, resource_limits: AnalysisLimits | None = None, execution_policy=None, cancel_event=None, _output_limits=None) -> dict[str, Any]:
     if execution_policy is not None:
         execution_policy.preflight()
     fields = load_analysis_recipe(recipe, resource_limits)
     limits = (resource_limits or AnalysisLimits()).tighten(fields.get("resources"))
+    if _output_limits is not None:
+        from dataclasses import replace
+        limits = replace(limits, **{key: min(getattr(limits, key), getattr(_output_limits, key))
+                         for key in ('max_output_bytes', 'max_output_files', 'max_temp_bytes')})
     capture = capture.resolve()
     output = output.resolve()
     if output.exists():
@@ -146,8 +150,11 @@ def run_analysis(capture: Path, channel: int, recipe: Path, output: Path, *, res
 
 
 def _execute_offline(*, output, capture, channel, fields, source, limits):
+    execution_fields = dict(fields)
+    if "resources" in fields:
+        execution_fields["resources"] = {key: min(value, getattr(limits, key)) for key, value in fields["resources"].items()}
     return execute_pipeline(
-        run_dir=output, processing_dir=output, fields=fields, source=source,
+        run_dir=output, processing_dir=output, fields=execution_fields, source=source,
         load_source=lambda: load_analysis_source(capture, channel, limits), resource_limits=limits,
         schema="wavebench.offline_pipeline.v1",
     )

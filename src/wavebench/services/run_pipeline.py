@@ -55,7 +55,7 @@ def ensure_operation_dependencies(all_operations: list[dict[str, Any]]) -> None:
     operations = [
         operation
         for operation in all_operations
-        if operation["op"] in {"filter", "psd", "peaks", "resample"}
+        if operation["op"] in {"filter", "psd", "peaks", "resample", "spectral_quality"}
         or operation["op"] == "smooth" and operation["method"] == "savgol"
     ]
     if not operations:
@@ -66,7 +66,7 @@ def ensure_operation_dependencies(all_operations: list[dict[str, Any]]) -> None:
             required_functions.update({"resample_poly", "firwin"})
         elif operation["op"] == "smooth":
             required_functions.add("savgol_coeffs")
-        elif operation["op"] == "peaks":
+        elif operation["op"] in {"peaks", "spectral_quality"}:
             required_functions.add("find_peaks")
         elif operation["op"] == "psd":
             required_functions.update({"welch", "get_window"})
@@ -165,7 +165,7 @@ def execute_pipeline(
         for metric in operation["metrics"]
     }
     for operation in operations:
-        if operation["op"] in {"measure_band", "peaks"}:
+        if operation["op"] in {"measure_band", "peaks", "spectral_quality"}:
             metrics.update({f"{operation['name']}_{metric}": None for metric in operation["metrics"]})
     warnings: list[str] = []
     exports: list[dict[str, Any]] = []
@@ -353,6 +353,13 @@ def execute_pipeline(
                         message = f"{operation['name']}: peak table truncated to {detected['retained_count']} rows"
                         stage["warnings"] = [message]
                         _extend_unique(warnings, [message])
+                elif op == "spectral_quality":
+                    from wavebench.data.spectral_quality import spectral_quality
+                    measured, metadata, operation_warnings = spectral_quality(signal, operation)
+                    metrics.update(measured)
+                    stage["measurement"] = metadata
+                    stage["warnings"] = operation_warnings
+                    _extend_unique(warnings, operation_warnings)
                 elif op == "measure_band":
                     assert isinstance(signal, PsdSignal)
                     measured, metadata, operation_warnings = measure_band(signal, operation)

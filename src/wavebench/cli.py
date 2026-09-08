@@ -1086,6 +1086,21 @@ def _main(argv: list[str] | None = None) -> int:
             from .data.analysis_resources import load_resource_limits
 
             limits = load_resource_limits(args.analysis_resources)
+            if args.command in {"pair-check", "pair-run"}:
+                from .services.pair_service import pair_check, pair_run
+                from .services.analysis_execution import load_analysis_execution
+                options = dict(capture=args.capture, recipe=args.recipe, resource_limits=limits,
+                               execution_policy=load_analysis_execution(args.analysis_execution))
+                result = pair_run(**options, output=args.output) if args.command == "pair-run" else pair_check(**options)
+                print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
+                return 0 if result["status"] == "ok" else 1
+            if args.command == "batch":
+                from .services.analysis_batch import run_batch
+                from .services.analysis_execution import load_analysis_execution
+                result = run_batch(args.manifest, args.output, resume=args.resume, resource_limits=limits,
+                                   execution_policy=load_analysis_execution(args.analysis_execution))
+                print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
+                return 0 if result["status"] == "ok" else 1
             if args.command == "report":
                 from .report.analysis import write_analysis_report
 

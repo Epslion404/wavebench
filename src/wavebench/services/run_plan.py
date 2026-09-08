@@ -32,6 +32,7 @@ from wavebench.services.frequency_response_calibration import normalize_frequenc
 
 ALLOWED_STEP_KINDS = {
     "analysis.pipeline",
+    "analysis.pair",
     "scope.auto",
     "scope.capture",
     "sweep.frequency_response",
@@ -95,6 +96,7 @@ _ANALYSIS_EXPORT_NAME = _STEP_ID
 
 _REQUIRED_FIELDS = {
     "analysis.pipeline": ("source", "operations"),
+    "analysis.pair": ("source", "reference_channel", "response_channel", "operations"),
     "power.set": ("voltage_v", "current_limit_a"),
     "power.output": ("state",),
     "source.set_freq": ("frequency_hz",),
@@ -191,6 +193,7 @@ _REQUIRED_FIELDS = {
 
 _OPTIONAL_FIELDS = {
     "analysis.pipeline": {"expect", "on_failure", "resources"},
+    "analysis.pair": {"expect", "on_failure", "resources"},
     "scope.auto": {"on_failure"},
     "scope.capture": {
         "channel",
@@ -335,11 +338,12 @@ _OPTIONAL_FIELDS = {
 # in sync as new step kinds are added.
 for _step_kind, _step_fields in _OPTIONAL_FIELDS.items():
     _step_fields.add("on_failure")
-    if _step_kind != "analysis.pipeline":
+    if _step_kind not in {"analysis.pipeline", "analysis.pair"}:
         _step_fields.add("safety_gate")
 
 
 _STEP_NOTES = {
+    "analysis.pair": "Analyze two evidence-validated channels from one earlier capture package after hardware cleanup. Currently accepts synthetic synchronization evidence only; real driver adaptation is not supported.",
     "analysis.pipeline": "Process one earlier scope.capture NPY after all hardware sessions close. Uses a validated linear operator list, checks optional dependencies on demand, and never opens an instrument.",
     "scope.auto": "Explicit RTM2032 AUToscale. It changes front-panel settings and is never inserted implicitly.",
     "scope.capture": "Trigger one acquisition, write a capture package, and optionally evaluate quality/expect checks. Use target_vpp or vertical_scale_v_per_div to fit the waveform vertically before capture.",
@@ -466,10 +470,14 @@ def format_run_plan_schema() -> str:
         "  Frequency domain: peak_frequency_hz, peak_amplitude_v, noise_floor_v, thd_ratio, and harmonic_2 through harmonic_5 frequency/amplitude fields.",
         "  PSD domain: measure_band requires name, band_hz, exclude_hz and metrics=mean_square_v2|rms_v|noise_rms_v. Metric keys are <name>_<metric>.",
         "",
+        "analysis.pair: reference_channel and response_channel must be distinct; source uses one earlier scope.capture with explicit save_npy=true.",
+        "  Pair operations: delay (integer lag), transfer (mean Welch H1/coherence), export. Only synthetic synchronization evidence is currently accepted.",
+        "  spectral_quality requires explicit integration bands, fundamental mode, harmonic orders, detection thresholds and metrics; only mean Welch PSD is accepted.",
+        "  Quality metrics: snr_db, sinad_db, sfdr_db, thdn_ratio, fundamental_frequency_hz, fundamental_power_v2, harmonic_power_v2, noise_power_v2, noise_bandwidth_hz, spur_frequency_hz, spur_power_v2, spur_dbc.",
         "analysis.pipeline PSD operation:",
         "  psd requires method=welch, window=hann|hamming|blackman, nperseg>=4, 0<=noverlap<nperseg, nfft>=nperseg, detrend=none|constant|linear, average=mean|median.",
         "  All parameters are explicit; lengths are integers. Segment windows are periodic.",
-        "  Requires time data before window or fft. Only export, measure_band or peaks may follow psd; at least one PSD result is required.",
+        "  Requires time data before window or fft. Only export, measure_band, spectral_quality or peaks may follow psd; at least one PSD result is required.",
         "  Requires optional SciPy. Exports frequency_hz,psd_v2_per_hz with one-sided density scaling.",
         "  peaks requires name, polarity=positive|negative|both, height>=0, prominence>=0, distance>0, width>=0, max_peaks=1..10000, metrics=[count].",
         "  Peak distance/width use seconds in time and Hz in spectra; spectral polarity must be positive. Produces <name>_count and JSON/CSV tables without changing signal domain.",
@@ -714,8 +722,8 @@ def _normalize_step_fields(index: int, kind: str, fields: dict[str, Any]) -> Non
         )
     if "channel" in fields:
         fields["channel"] = _positive_int(fields["channel"], f"{prefix}.channel")
-    if kind == "analysis.pipeline":
-        _normalize_analysis_pipeline_fields(prefix, fields)
+    if kind in {"analysis.pipeline", "analysis.pair"}:
+        _normalize_analysis_pipeline_fields(prefix, fields, pair=kind == "analysis.pair")
     elif kind == "scope.capture":
         if "label" in fields:
             fields["label"] = _non_empty_str(fields["label"], f"{prefix}.label")
@@ -1241,7 +1249,7 @@ def _validate_analysis_steps(steps: list[RunStep]) -> None:
         by_id[step.id] = step
 
     for step in steps:
-        if step.kind != "analysis.pipeline":
+        if step.kind not in {"analysis.pipeline", "analysis.pair"}:
             continue
         source_id = step.fields["source"]["step"]
         source = by_id.get(source_id)
@@ -1264,7 +1272,7 @@ def _validate_analysis_steps(steps: list[RunStep]) -> None:
 
     analysis_started = False
     for step in steps:
-        if step.kind == "analysis.pipeline":
+        if step.kind in {"analysis.pipeline", "analysis.pair"}:
             analysis_started = True
         elif analysis_started:
             raise ConfigError("analysis.pipeline steps must form a contiguous suffix of the plan")
@@ -1276,7 +1284,7 @@ def _normalize_step_id(value: Any, name: str) -> str:
     return value
 
 
-def _normalize_analysis_pipeline_fields(prefix: str, fields: dict[str, Any]) -> None:
+def _normalize_analysis_pipeline_fields(prefix: str, fields: dict[str, Any], *, pair=False) -> None:
     source = _table(fields["source"], f"{prefix}.source")
     _reject_unknown_keys(source, {"step"}, f"{prefix}.source")
     if "step" not in source:
@@ -1284,10 +1292,15 @@ def _normalize_analysis_pipeline_fields(prefix: str, fields: dict[str, Any]) -> 
     fields["source"] = {
         "step": _normalize_step_id(source["step"], f"{prefix}.source.step")
     }
-    normalize_analysis_operations(prefix, fields)
+    if pair:
+        from .pair_service import normalize_pair_fields
+        normalize_pair_fields(fields)
+    else:
+        normalize_analysis_operations(prefix, fields)
 
 
 def normalize_analysis_operations(prefix: str, fields: dict[str, Any]) -> None:
+    from wavebench.data.spectral_quality import QUALITY_FIELDS, normalize_quality
     if "resources" in fields:
         from wavebench.data.analysis_resources import normalize_limits
 
@@ -1307,6 +1320,7 @@ def normalize_analysis_operations(prefix: str, fields: dict[str, Any]) -> None:
     psd_result = False
 
     allowed_fields = {
+        "spectral_quality": QUALITY_FIELDS,
         "remove_dc": {"op"},
         "detrend": {"op", "method"},
         "filter": {
@@ -1332,6 +1346,7 @@ def normalize_analysis_operations(prefix: str, fields: dict[str, Any]) -> None:
         "export": {"op", "name", "formats"},
     }
     required_fields = {
+        "spectral_quality": QUALITY_FIELDS - {"op"},
         "detrend": {"method"},
         "filter": {"family", "response", "cutoff_hz", "mode"},
         "window": {"name"},
@@ -1365,7 +1380,7 @@ def normalize_analysis_operations(prefix: str, fields: dict[str, Any]) -> None:
             raise ConfigError(f"{operation_prefix} {op} missing required field {names}")
 
         operation: dict[str, Any] = {"op": op}
-        if domain == "psd" and op not in {"export", "measure_band", "peaks"}:
+        if domain == "psd" and op not in {"export", "measure_band", "peaks", "spectral_quality"}:
             raise ConfigError(f"{operation_prefix}: only export, measure_band or peaks is supported after psd")
         if op == "psd":
             if domain != "time" or "window" in transforms:
@@ -1547,11 +1562,14 @@ def normalize_analysis_operations(prefix: str, fields: dict[str, Any]) -> None:
             except DataError as exc:
                 raise ConfigError(f"{operation_prefix}: {exc}") from exc
             domain = "psd"
-        elif op in {"measure_band", "peaks"}:
-            if op == "measure_band" and domain != "psd":
+        elif op in {"measure_band", "peaks", "spectral_quality"}:
+            if op in {"measure_band", "spectral_quality"} and domain != "psd":
                 raise ConfigError(f"{operation_prefix}: measure_band requires PSD data")
             try:
-                operation = (normalize_band(raw_operation) if op == "measure_band" else normalize_peaks(raw_operation))
+                operation = (normalize_quality(raw_operation) if op == "spectral_quality" else
+                             normalize_band(raw_operation) if op == "measure_band" else normalize_peaks(raw_operation))
+                if op == "spectral_quality" and next(item for item in reversed(normalized) if item["op"] == "psd")["average"] != "mean":
+                    raise DataError("spectral_quality requires mean Welch PSD")
             except DataError as exc:
                 raise ConfigError(f"{operation_prefix}: {exc}") from exc
             if op == "peaks" and domain != "time" and operation["polarity"] != "positive":

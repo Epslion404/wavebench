@@ -373,6 +373,7 @@ _BUILTIN_SPECS = (
     _spec("run.intent", None, effect="offline", lease_mode="none"),
     _spec("run.sleep", None, effect="offline", lease_mode="none"),
     _spec("analysis.pipeline", None, effect="offline", lease_mode="none"),
+    _spec("analysis.pair", None, effect="offline", lease_mode="none"),
     _spec("lock.status", None, effect="offline", lease_mode="none"),
     _spec("run.report", None, effect="offline", lease_mode="none"),
     _spec("run.compare", None, effect="offline", lease_mode="none"),

@@ -15,6 +15,10 @@ Top-level tables:
   [[steps]] optional structural field: id matching ^[a-z][a-z0-9_-]{0,63}$
 
 Supported step kinds:
+  - analysis.pair
+      required: source, reference_channel, response_channel, operations
+      optional : expect, on_failure, resources
+      note     : Analyze two evidence-validated channels from one earlier capture package after hardware cleanup. Currently accepts synthetic synchronization evidence only; real driver adaptation is not supported.
   - analysis.pipeline
       required: source, operations
       optional : expect, on_failure, resources
@@ -250,10 +254,14 @@ analysis.pipeline metrics:
   Frequency domain: peak_frequency_hz, peak_amplitude_v, noise_floor_v, thd_ratio, and harmonic_2 through harmonic_5 frequency/amplitude fields.
   PSD domain: measure_band requires name, band_hz, exclude_hz and metrics=mean_square_v2|rms_v|noise_rms_v. Metric keys are <name>_<metric>.
 
+analysis.pair: reference_channel and response_channel must be distinct; source uses one earlier scope.capture with explicit save_npy=true.
+  Pair operations: delay (integer lag), transfer (mean Welch H1/coherence), export. Only synthetic synchronization evidence is currently accepted.
+  spectral_quality requires explicit integration bands, fundamental mode, harmonic orders, detection thresholds and metrics; only mean Welch PSD is accepted.
+  Quality metrics: snr_db, sinad_db, sfdr_db, thdn_ratio, fundamental_frequency_hz, fundamental_power_v2, harmonic_power_v2, noise_power_v2, noise_bandwidth_hz, spur_frequency_hz, spur_power_v2, spur_dbc.
 analysis.pipeline PSD operation:
   psd requires method=welch, window=hann|hamming|blackman, nperseg>=4, 0<=noverlap<nperseg, nfft>=nperseg, detrend=none|constant|linear, average=mean|median.
   All parameters are explicit; lengths are integers. Segment windows are periodic.
-  Requires time data before window or fft. Only export, measure_band or peaks may follow psd; at least one PSD result is required.
+  Requires time data before window or fft. Only export, measure_band, spectral_quality or peaks may follow psd; at least one PSD result is required.
   Requires optional SciPy. Exports frequency_hz,psd_v2_per_hz with one-sided density scaling.
   peaks requires name, polarity=positive|negative|both, height>=0, prominence>=0, distance>0, width>=0, max_peaks=1..10000, metrics=[count].
   Peak distance/width use seconds in time and Hz in spectra; spectral polarity must be positive. Produces <name>_count and JSON/CSV tables without changing signal domain.

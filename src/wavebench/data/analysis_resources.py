@@ -140,12 +140,15 @@ class AnalysisBudget:
             taps = 20 * max(operation["up"], operation["down"]) + 1
             memory += 64 * out + 32 * taps
             work = out * (taps // operation["up"] + 1)
-        elif op == "peaks":
+        elif op in {"peaks", "spectral_quality"}:
             # Worst case admission before find_peaks allocates any candidates or properties.
-            candidates = (count // 2) * (2 if operation["polarity"] == "both" else 1)
+            candidates = (count // 2) * (2 if operation.get("polarity") == "both" else 1)
             self.limits.check("max_peak_candidates", candidates, op)
             memory += 1024 * candidates
             work = count * max(1, count.bit_length())
+            if op == "spectral_quality":
+                # Explicit per-candidate integration masks are linear in spectrum length.
+                work += count * (candidates + len(operation['harmonic_orders']) + 8)
         elif op == "export":
             cols = 4 if domain == "frequency" else 2
             expected = sum(count * cols * (8 if fmt == "npy" else 32) + 1024
