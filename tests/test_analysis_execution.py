@@ -75,8 +75,10 @@ def test_cancel_retains_completed_export_and_finalizes(tmp_path, cooperative):
             time.sleep(0.01)
     thread = threading.Thread(target=request_cancel, daemon=True)
     thread.start()
+    # Cooperative shutdown includes checkpoint writes and process teardown on Windows.
+    grace_s = 10 if cooperative else 0.5
     artifact = supervise(_slow_pipeline, dict(output=output, cooperative=cooperative),
-        policy=AnalysisExecution(timeout_s=30, grace_s=0.5), run_dir=output, processing_dir=output,
+        policy=AnalysisExecution(timeout_s=30, grace_s=grace_s), run_dir=output, processing_dir=output,
         fields=FIELDS, source={'status': 'ok'}, limits=AnalysisLimits(), cancel_event=cancelled)
     thread.join(1)
     info = artifact['analysis_pipeline']
