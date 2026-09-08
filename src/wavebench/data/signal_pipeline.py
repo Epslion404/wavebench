@@ -7,6 +7,7 @@ from typing import Any, Iterable, Sequence
 import numpy as np
 
 from wavebench.errors import DataError
+from wavebench.data.analysis_control import checkpoint
 
 
 ANALYSIS_TIME_METRICS = frozenset({
@@ -174,6 +175,7 @@ def welch_psd(
             density = np.zeros(nfft // 2 + 1, dtype=np.float64)
             segments = 0
             for start in range(0, samples - nperseg + 1, nperseg - noverlap):
+                checkpoint()
                 frequencies, segment_density = scipy_signal.welch(
                     signal.voltage_v[start:start + nperseg], noverlap=0, average="mean", **kwargs,
                 )
@@ -228,6 +230,7 @@ def validate_waveform(data: Any) -> TimeSignal:
         raise DataError("analysis pipeline input must contain real numeric values")
     result = np.empty(array.shape, dtype=np.float64)
     for start in range(0, len(array), 4096):
+        checkpoint()
         block = np.asarray(array[start:start + 4096], dtype=np.float64)
         if not np.all(np.isfinite(block)):
             raise DataError("analysis pipeline input must contain only finite values")
@@ -338,6 +341,7 @@ def filter_fir(
             voltage = np.empty_like(signal.voltage_v)
             state = np.zeros(numtaps - 1)
             for start in range(0, voltage.size, FILTER_BLOCK_SAMPLES):
+                checkpoint()
                 block, state = scipy_signal.lfilter(
                     taps, [1.0], signal.voltage_v[start:start + FILTER_BLOCK_SAMPLES], zi=state,
                 )
@@ -449,6 +453,7 @@ def filter_iir(
             voltage = np.empty_like(signal.voltage_v)
             state = np.zeros((len(sos), 2))
             for start in range(0, voltage.size, FILTER_BLOCK_SAMPLES):
+                checkpoint()
                 block, state = scipy_signal.sosfilt(
                     sos, signal.voltage_v[start:start + FILTER_BLOCK_SAMPLES], zi=state,
                 )

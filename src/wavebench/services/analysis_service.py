@@ -75,7 +75,9 @@ def load_analysis_source(capture: Path, channel: int, resource_limits: AnalysisL
     }, waveform
 
 
-def check_analysis(capture: Path, channel: int, recipe: Path, *, resource_limits: AnalysisLimits | None = None) -> dict[str, Any]:
+def check_analysis(capture: Path, channel: int, recipe: Path, *, resource_limits: AnalysisLimits | None = None, execution_policy=None) -> dict[str, Any]:
+    if execution_policy is not None:
+        execution_policy.preflight()
     fields = load_analysis_recipe(recipe, resource_limits)
     limits = (resource_limits or AnalysisLimits()).tighten(fields.get("resources"))
     source, data = load_analysis_source(capture, channel, limits)
@@ -92,10 +94,13 @@ def check_analysis(capture: Path, channel: int, recipe: Path, *, resource_limits
             cols = 4 if domain == "frequency" else 2
             budget.output_bytes += sum(count * cols * (8 if fmt == "npy" else 32) + 1024 for fmt in operation["formats"])
     return {"schema": "wavebench.analysis_check.v1", "status": "ok", "source": source,
-            "samples": len(data.time_s), "recipe": fields, "resources": limits.evidence()}
+            "samples": len(data.time_s), "recipe": fields, "resources": limits.evidence(),
+            **({"execution": execution_policy.evidence()} if execution_policy is not None else {})}
 
 
-def run_analysis(capture: Path, channel: int, recipe: Path, output: Path, *, resource_limits: AnalysisLimits | None = None) -> dict[str, Any]:
+def run_analysis(capture: Path, channel: int, recipe: Path, output: Path, *, resource_limits: AnalysisLimits | None = None, execution_policy=None, cancel_event=None) -> dict[str, Any]:
+    if execution_policy is not None:
+        execution_policy.preflight()
     fields = load_analysis_recipe(recipe, resource_limits)
     limits = (resource_limits or AnalysisLimits()).tighten(fields.get("resources"))
     capture = capture.resolve()
@@ -107,11 +112,14 @@ def run_analysis(capture: Path, channel: int, recipe: Path, output: Path, *, res
     if any((parent / "run.json").exists() for parent in output.parents):
         raise ConfigError("analysis output must not modify an existing run")
     source = {"kind": "capture_package", "package": str(capture), "channel": channel, "status": None}
-    artifact = execute_pipeline(
-        run_dir=output, processing_dir=output, fields=fields, source=source,
-        load_source=lambda: load_analysis_source(capture, channel, limits), resource_limits=limits,
-        schema="wavebench.offline_pipeline.v1",
-    )
+    options = dict(output=output, capture=capture, channel=channel, fields=fields, source=source, limits=limits)
+    if execution_policy is not None:
+        from .analysis_execution import supervise
+        artifact = supervise(_execute_offline, options, policy=execution_policy, run_dir=output,
+            processing_dir=output, fields=fields, source=source, limits=limits,
+            schema="wavebench.offline_pipeline.v1", cancel_event=cancel_event)
+    else:
+        artifact = _execute_offline(**options)
     failed = artifact["analysis_pipeline"]["status"] == "failed"
     if "expect" in artifact:
         failed = failed or artifact["expect"]["status"] != "ok"
@@ -135,3 +143,11 @@ def run_analysis(capture: Path, channel: int, recipe: Path, output: Path, *, res
         result["error"] = error_envelope(exc, operation="analysis.result_metadata")
         _atomic_write_json(output / "analysis.json", result)
     return result
+
+
+def _execute_offline(*, output, capture, channel, fields, source, limits):
+    return execute_pipeline(
+        run_dir=output, processing_dir=output, fields=fields, source=source,
+        load_source=lambda: load_analysis_source(capture, channel, limits), resource_limits=limits,
+        schema="wavebench.offline_pipeline.v1",
+    )

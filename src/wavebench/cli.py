@@ -240,9 +240,11 @@ def _load_run_service(args: argparse.Namespace) -> RunService:
         config = config.with_resource(args.resource)
     from .data.analysis_resources import load_resource_limits
 
+    from .services.analysis_execution import load_analysis_execution
+    execution = load_analysis_execution(getattr(args, "analysis_execution", None))
     profile = getattr(args, "analysis_resources", None)
     return RunService(config=config, logger=CommandLogger(),
-                      analysis_limits=load_resource_limits(profile) if profile else None)
+                      analysis_limits=load_resource_limits(profile) if profile else None, analysis_execution=execution)
 
 
 def _load_sweep_service(args: argparse.Namespace) -> SweepService:
@@ -1091,7 +1093,9 @@ def _main(argv: list[str] | None = None) -> int:
                 return 0
             from .services.analysis_service import check_analysis, run_analysis
 
-            options = dict(capture=Path(args.capture), channel=args.channel, recipe=Path(args.recipe), resource_limits=limits)
+            from .services.analysis_execution import load_analysis_execution
+            options = dict(capture=Path(args.capture), channel=args.channel, recipe=Path(args.recipe), resource_limits=limits,
+                           execution_policy=load_analysis_execution(args.analysis_execution))
             result = (run_analysis(**options, output=Path(args.output))
                       if args.command == "run" else check_analysis(**options))
             print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
@@ -1123,7 +1127,8 @@ def _main(argv: list[str] | None = None) -> int:
                 plan = load_run_plan(args.plan)
                 service = _load_run_service(args)
                 service.check(plan)
-                intent = build_execution_intent(plan, service.config, resource_limits=getattr(service, "analysis_limits", None))
+                intent = build_execution_intent(plan, service.config, resource_limits=getattr(service, "analysis_limits", None),
+                                                execution_policy=getattr(service, "analysis_execution", None))
                 if args.output:
                     output = write_execution_intent(intent, args.output)
                     if not args.json:

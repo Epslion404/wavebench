@@ -250,6 +250,8 @@ class RunService:
     logger: CommandLogger
     lease_manager: ResourceLeaseManager | None = None
     analysis_limits: AnalysisLimits | None = None
+    analysis_execution: Any = None
+    analysis_cancel_event: Any = None
 
     def verify(self, plan: RunPlan) -> list[RunPreflightRecord]:
         self.check(plan)
@@ -311,6 +313,8 @@ class RunService:
         return records
 
     def check(self, plan: RunPlan) -> None:
+        if self.analysis_execution is not None:
+            self.analysis_execution.preflight()
         from wavebench.data.analysis_resources import AnalysisLimits, check_static
 
         for step in plan.steps:
@@ -716,9 +720,9 @@ class RunService:
         execution_intent: Mapping[str, Any] | None = None,
     ) -> RunResult:
         self.check(plan)
-        intent = build_execution_intent(plan, self.config, resource_limits=self.analysis_limits)
+        intent = build_execution_intent(plan, self.config, resource_limits=self.analysis_limits, execution_policy=self.analysis_execution)
         if execution_intent is not None:
-            intent = verify_execution_intent(execution_intent, plan, self.config, resource_limits=self.analysis_limits)
+            intent = verify_execution_intent(execution_intent, plan, self.config, resource_limits=self.analysis_limits, execution_policy=self.analysis_execution)
         plan_hash = intent.plan_digest
         analysis_steps = [step for step in plan.steps if step.kind == "analysis.pipeline"]
         hardware_steps = plan.steps[: len(plan.steps) - len(analysis_steps)]
@@ -1117,6 +1121,7 @@ class RunService:
                         source_step=source_step,
                         source_record=source_record,
                         resource_limits=self.analysis_limits,
+                        execution_policy=self.analysis_execution, cancel_event=self.analysis_cancel_event,
                     )
                 except Exception as exc:  # noqa: BLE001 - preserve offline step failure
                     payload = error_envelope(
@@ -1148,7 +1153,8 @@ class RunService:
                 )
                 records.append(record)
                 write_step_record(steps_dir, record)
-                if record.status == "failed" and step.fields.get("on_failure", "stop") == "stop":
+                cancelled = artifact.get("analysis_pipeline", {}).get("error", {}).get("code") == "analysis_cancelled"
+                if record.status == "failed" and (cancelled or step.fields.get("on_failure", "stop") == "stop"):
                     analysis_failure = {
                         "type": "StepFailure",
                         "code": "step_failed",

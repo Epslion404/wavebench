@@ -55,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
         analysis_command.add_argument("--channel", type=int, required=True)
         analysis_command.add_argument("--recipe", required=True)
         analysis_command.add_argument("--analysis-resources", help="Execution resource profile TOML")
+        analysis_command.add_argument("--analysis-execution", help="Analysis execution profile TOML")
         if command == "run":
             analysis_command.add_argument("--output", required=True)
     mcp_parser = subparsers.add_parser("mcp", help="HTTP MCP server / HTTP MCP 服务")
@@ -391,6 +392,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_check.add_argument("--plan", required=True, help="Path to a WaveBench run plan TOML file")
     add_runtime_options(run_check)
     run_check.add_argument("--analysis-resources", help="Analysis resource profile TOML")
+    run_check.add_argument("--analysis-execution", help="Analysis execution profile TOML")
     run_intent = run_sub.add_parser(
         "intent",
         help="Build an offline execution intent for a run plan / 为运行计划生成离线执行意图",
@@ -399,6 +401,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_intent.add_argument("--output", default=None, help="Write the execution intent JSON to this path")
     add_runtime_options(run_intent)
     run_intent.add_argument("--analysis-resources", help="Analysis resource profile TOML")
+    run_intent.add_argument("--analysis-execution", help="Analysis execution profile TOML")
     run_verify = run_sub.add_parser(
         "verify",
         help="Verify / 预检 instruments referenced by a run plan with read-only *IDN? queries",
@@ -406,6 +409,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_verify.add_argument("--plan", required=True, help="Path to a WaveBench run plan TOML file")
     add_runtime_options(run_verify)
     run_verify.add_argument("--analysis-resources", help="Analysis resource profile TOML")
+    run_verify.add_argument("--analysis-execution", help="Analysis execution profile TOML")
     run_sub.add_parser("schema", help="Print supported run plan step kinds and fields")
     run_template = run_sub.add_parser("template", help="Create or print conservative run plan templates")
     run_template.add_argument("template", nargs="?", help="Template name, e.g. source-scope-sine")
@@ -429,6 +433,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_template.add_argument("--current-limit", type=float, default=0.1, help="Template power current limit in A")
     run_plan = run_sub.add_parser("plan", help="Execute a WaveBench run plan")
     run_plan.add_argument("--analysis-resources", help="Analysis resource profile TOML")
+    run_plan.add_argument("--analysis-execution", help="Analysis execution profile TOML")
     run_plan.add_argument("--plan", required=True, help="Path to a WaveBench run plan TOML file")
     run_plan.add_argument(
         "--intent",

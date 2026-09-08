@@ -13,6 +13,7 @@ import numpy as np
 
 from wavebench.data.analysis_resources import AnalysisBudget, AnalysisLimits
 from wavebench.errors import DataError
+from wavebench.data.analysis_control import checkpoint
 
 
 BLOCK_ROWS = 4096
@@ -84,6 +85,7 @@ def hash_stream(file) -> str:
     file.seek(0)
     digest = sha256()
     while chunk := file.read(1024 * 1024):
+        checkpoint()
         digest.update(chunk)
     return digest.hexdigest()
 

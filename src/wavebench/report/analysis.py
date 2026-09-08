@@ -200,6 +200,13 @@ def render_analysis_sections(entries: list[tuple[Path, str, dict[str, Any]]], *,
             if details:
                 sections.append(f"<h3>{escape(label)}</h3><pre>{escape(json.dumps(artifact, indent=2, ensure_ascii=False))}</pre>")
             sections.append(f'<p>{escape(label)}: sampling={escape(json.dumps(manifest.get("sampling")))}</p>')
+            execution = manifest.get("execution")
+            if execution:
+                sections.append('<p>执行监督 / Execution supervision: '
+                    + escape(str(execution.get('reason') or manifest.get('status')))
+                    + '; timeout_s=' + escape(str(execution.get('timeout_s')))
+                    + '; memory_backend=' + escape(str(execution.get('memory_backend')))
+                    + '; forced=' + escape(str(execution.get('forced'))) + '</p>')
             source = manifest["source"]
             peak_sets = {}
             for peak in manifest.get("peaks", []):

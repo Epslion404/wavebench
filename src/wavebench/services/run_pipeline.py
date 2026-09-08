@@ -11,6 +11,7 @@ from typing import Any, Callable, Iterator
 
 import numpy as np
 from wavebench.data.analysis_resources import AnalysisBudget, AnalysisLimits, AnalysisResourceError, check_static
+from wavebench.data.analysis_control import checkpoint, cancel_signal
 from wavebench.data.analysis_io import load_waveform, BLOCK_ROWS, read_json_bounded
 
 from wavebench.data.signal_pipeline import (
@@ -110,13 +111,23 @@ def execute_analysis_pipeline(
     source_step: RunStep,
     source_record: RunStepRecord | None,
     resource_limits: AnalysisLimits | None = None,
+    execution_policy=None, cancel_event=None,
 ) -> dict[str, Any]:
     limits = (resource_limits or AnalysisLimits()).tighten(step.fields.get("resources"))
     check_static(step.fields["operations"], limits)
     processing_dir = run_dir / "processing" / (
         f"{step.index:02d}_{step.id or 'analysis_pipeline'}"
     )
-    def load_source() -> tuple[dict[str, Any], np.ndarray]:
+    if execution_policy is not None:
+        from .analysis_execution import supervise
+        return supervise(execute_analysis_pipeline,
+            dict(run_dir=run_dir, step=step, source_step=source_step, source_record=source_record,
+                 resource_limits=limits), policy=execution_policy, run_dir=run_dir,
+            processing_dir=processing_dir, fields=step.fields, limits=limits, cancel_event=cancel_event,
+            source={'step': source_step.id, 'step_index': source_step.index,
+                    'status': source_record.status if source_record else 'unavailable'})
+
+    def load_source() -> tuple[dict[str, Any], TimeSignal]:
         _, details, waveform = _load_source_waveform(
             run_dir=run_dir, source_step=source_step, source_record=source_record, resource_limits=limits,
         )
@@ -168,7 +179,22 @@ def execute_pipeline(
     failure: dict[str, Any] | None = None
     failed_stage: str | None = None
 
+    def save_progress():
+        if cancel_signal.get() is None:
+            return
+        document = dict(schema=schema, status='running', partial=True, source=source,
+            operations=operations, stages=stages, sampling=sampling, window=window,
+            warnings=warnings, exports=exports, peaks=peaks, filters=filters, psd=psd,
+            transformations=transformations,
+            metrics=_derived_relative(metrics_path, run_dir),
+            resources={**limits.evidence(), 'work_units': budget.work_units,
+                       'data_output_bytes': budget.output_bytes, 'data_output_files': budget.output_files})
+        _atomic_write_json(metrics_path, {'schema': ANALYSIS_METRICS_SCHEMA, 'metrics': metrics})
+        _atomic_write_json(manifest_path, document)
+
     try:
+        save_progress()
+        checkpoint()
         source_details, waveform = load_source()
         source.update(source_details)
         if isinstance(waveform, TimeSignal):
@@ -190,6 +216,8 @@ def execute_pipeline(
             }
             stages.append(stage)
             try:
+                save_progress()
+                checkpoint()
                 count = len(signal.time_s) if isinstance(signal, TimeSignal) else len(signal.frequency_hz)
                 retained = sum(item.get("retained_count", 0) * 1024 for item in peaks)
                 stage["resources"] = budget.stage(operation, count, domain=_domain(signal), retained_bytes=retained)
@@ -359,6 +387,7 @@ def execute_pipeline(
                     ):
                         exported.append(item)
                         exports.append(item)
+                        save_progress()
                     stage["exports"] = [item["path"] for item in exported]
                 else:  # pragma: no cover - RunPlan validation owns this invariant
                     raise DataError(f"unsupported analysis operation: {op}")
@@ -367,6 +396,7 @@ def execute_pipeline(
                 raise
             stage["status"] = "ok"
             stage["output_domain"] = _domain(signal)
+            save_progress()
     except Exception as exc:  # noqa: BLE001 - analysis failures are step artifacts
         failed_stage = _failed_stage(stages)
         failure = error_envelope(
@@ -721,6 +751,7 @@ def _atomic_write_npy(path: Path, data: np.ndarray | None, *, blocks=None, shape
             np.lib.format.write_array_header_1_0(file, {"descr": np.dtype(float).str,
                 "fortran_order": False, "shape": shape})
             for block in blocks():
+                checkpoint()
                 encoded = np.asarray(block, dtype=float, order="C").tobytes()
                 if budget:
                     budget.pending_file(file.tell() + len(encoded))
@@ -745,6 +776,7 @@ def _atomic_write_csv(path: Path, columns: list[str], data: np.ndarray | None, *
             writer = csv.writer(file)
             writer.writerow(columns)
             for block in blocks():
+                checkpoint()
                 # Only this bounded block becomes Python objects; numeric formatting stays unchanged.
                 import io
                 buffer = io.StringIO(newline="")
@@ -792,6 +824,7 @@ def _sha256_file(path: Path) -> str:
     digest = sha256()
     with path.open("rb") as file:
         while chunk := file.read(1024 * 1024):
+            checkpoint()
             digest.update(chunk)
     return digest.hexdigest()
 
