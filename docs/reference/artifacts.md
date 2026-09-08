@@ -149,4 +149,10 @@ recovered, expect_status, expect_failures, expect_fft_status, expect_fft_failure
 
 双通道频域 NPY／CSV 的列固定为 `frequency_hz,real_v,imaginary_v,gain_db,phase_rad,coherence,valid,coherent`。real_v／imaginary_v 为 H1 的实部／虚部，实际单位是 V/V；gain_db 为 20 log10 幅值，phase_rad 为弧度。频率始终有效；无效响应的五个数值列在 NPY 中为 NaN，CSV 中为空，valid／coherent 为 0／1。这个独立合同不改变单通道导出禁止非有限值的规则。JSON 指标继续使用 null。
 
-报告将双通道增益、相位、相干性分图展示，保留无效区断点，并显示有效／高相干 bin 数、延迟指标及 synthetic 证据类型。当前曲线渲染读取 NPY；仅导出 CSV 时显示数据链接，不伪造图形。显示抽稀仍不参与测量或验收。
+报告将双通道增益、相位、相干性分图展示，保留无效区断点，并显示有效／高相干 bin 数、延迟指标及同步证据类型。当前曲线渲染读取 NPY；仅导出 CSV 时显示数据链接，不伪造图形。显示抽稀仍不参与测量或验收。
+
+## 驱动生成的同步证据
+
+显式同步 capture 在 metadata 中写入 `synchronization`，使用 `wavebench.capture_sync.v1` 的 `driver_frozen_single` 类型。driver 字段记录驱动 ID、型号与固件；procedure 记录插件流程版本、一次采集设置、完成／冻结确认、逐通道配置检查和诊断配置。acquisition group 是主机事务标识，不是硬件采集序号；未提供硬件序号时为 null。任一通道读取或证据校验失败，部分波形可保留，但失败包不得带 verified 同步证明。
+
+原始 NPY 与 metadata 不因离线分析被改写。RunPlan capture 的 package 路径沿用工作目录相对路径约定；pair 入口在执行前解析绝对位置，包内文件仍受路径越界检查。未校准的链路时延和相干结果不构成 DUT 精密延迟校准。

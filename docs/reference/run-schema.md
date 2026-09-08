@@ -48,9 +48,9 @@
 
 独立入口为 `analysis pair-check/pair-run --capture <package> --recipe <recipe>`，`pair-run` 另需新的 `--output`。配方 schema 为 `wavebench.analysis_pair_recipe.v1`，包含 `reference_channel`、`response_channel`、`operations` 和可选 `expect`／`resources`。资源与执行配置选项同单通道接口。示例见 `plans/example_pair_analysis.toml`。
 
-RunPlan 使用独立的 `analysis.pair`，同样要求 `source={step="earlier_capture"}` 指向更早且显式保存 NPY 的 `scope.capture`。它与 `analysis.pipeline` 共同组成离线后缀，不支持 safety_gate，在硬件恢复、会话关闭与租约释放后执行。当前真实采集不会生成足够的同步证据，因此该入口只完成 Core 离线集成与 synthetic 测试；真实插件适配与实机验收尚未完成。
+RunPlan 使用独立的 `analysis.pair`，同样要求 `source={step="earlier_capture"}` 指向更早且显式保存 NPY 的 `scope.capture`。它与 `analysis.pipeline` 共同组成离线后缀，不支持 safety_gate，在硬件恢复、会话关闭与租约释放后执行。真实同步采集通过独立 `scope.capture_synchronized` capability 提供，缺少该 capability 时在触发前拒绝。`scope.capture` 显式设置 `channels=[1,2]`、`synchronized=true`、`save_npy=true` 和 `points="DEF"`；不接受单通道 `channel`、quality／expect／自动重试配置。CLI 等价入口为 `scope capture --channel 1 --channel 2 --points def --synchronized`。适配的具体型号、固件和采集模式由插件声明与验证；不会自动升级旧包。
 
-同包两路必须不同且指向不同 NPY。metadata 的 `synchronization` 必须使用 `wavebench.capture_sync.v1`，当前仅接受 `kind="synthetic"`、`status="verified"`。还要求 `producer.name`／`producer.version`、来源为 synthetic 的 `acquisition_group.id`、`timebase_id`、`record_id`、`single_record`／`frozen_read` 保证，以及每路 time_start_s、sample_interval_s、samples、skew_s、uncertainty_s。示例生成器给出完整结构。普通 metadata 和 SHA-256 用于一致性追溯，并非防伪签名。
+同包两路必须不同且指向不同 NPY。metadata 的 `synchronization` 必须使用 `wavebench.capture_sync.v1`，接受 `kind="synthetic"` 或 `kind="driver_frozen_single"`，状态均须为 `verified`。还要求 `producer.name`／`producer.version`、来源类型与 kind 一致的 `acquisition_group.id`、`timebase_id`、`record_id`、`single_record`／`frozen_read` 保证，以及每路 time_start_s、sample_interval_s、samples、skew_s、uncertainty_s。示例生成器给出 synthetic 结构。driver_frozen_single 还需 `driver.id`／`driver.model`／`driver.firmware`、producer 与 procedure 版本匹配、single_count=1、完成等待与前后冻结证明、每路配置未变检查。Core 校验通用结构及 metadata 身份，厂商专属完成语义由插件负责。未知模拟 skew／不确定度可为 null，不能据此推断为零。普通 metadata 和 SHA-256 用于一致性追溯，并非防伪签名，也不能排除前面板或不合作控制器的并发干预。
 
 两路点数一致、各自等间隔，并逐块检查时间轴绝对差不超过 `dt*1e-6`；不使用绝对时间戳的相对容差放宽偏移。不自动裁剪、补零、重采样或 deskew；skew 信息仅记录，不应用补偿。旧包缺证据仍可单通道分析，不能通过同目录、同时间轴或主机 ID 推断同步。
 
