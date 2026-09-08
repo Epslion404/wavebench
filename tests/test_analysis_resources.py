@@ -39,7 +39,7 @@ def test_static_and_joint_welch_budget():
     limits = AnalysisLimits()
     with pytest.raises(AnalysisResourceError, match="max_zero_phase_fir_taps"):
         check_static([dict(op="filter", family="fir", mode="zero_phase", numtaps=257)], limits)
-    operation = dict(op="psd", **(PARAMS | dict(nfft=2**20, nperseg=1024, noverlap=512)))
+    operation = dict(op="psd", **(PARAMS | dict(nfft=2**20, nperseg=1024, noverlap=512, average="median")))
     check_static([operation, EXPORT], limits)
     with pytest.raises(AnalysisResourceError) as caught:
         AnalysisBudget(limits).stage(operation, 2**20)

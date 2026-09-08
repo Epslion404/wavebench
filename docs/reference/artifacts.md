@@ -2,7 +2,7 @@
 
 ## 独立离线分析
 
-分析 manifest 的 `resources` 记录 `wavebench.analysis_resources.v1`、估算器 `conservative.v1`、有效限额、累计工作量，以及写入最终 metadata 前的派生数据字节／文件数。每个实际执行阶段的 `resources` 记录该阶段工作集与运算量估算。缺少这些字段的旧产物仍可读取。
+分析 manifest 的 `resources` 记录 `wavebench.analysis_resources.v1`、估算器 `conservative.v2`、有效限额、累计工作量，以及写入最终 metadata 前的派生数据字节／文件数。每个实际执行阶段的 `resources` 记录该阶段工作集与运算量估算。缺少这些字段的旧产物仍可读取。
 
 NPY 来源先检查有界 header、实数 dtype、二维形状和文件长度，再只读映射；验证按块完成，跨块时间轴同样检查。处理结果使用独立工作数组，原始映射不写入。来源摘要使用同一打开文件计算，检测到文件替换或元数据变化时拒绝；这不是文件系统快照，不能保证识别所有外部并发修改。
 
@@ -99,6 +99,8 @@ IIR 项记录 design、响应、截止频率、原型阶数、变换后的数字
 时域 NPY 和 CSV 固定为 `time_s,voltage_v` 两列。FFT 频域 NPY 和 CSV 固定为 `frequency_hz,real_v,imaginary_v,amplitude_v` 四列。PSD NPY 和 CSV 固定为 `frequency_hz,psd_v2_per_hz` 两列。每个导出记录文件路径、列名和 SHA-256；路径相对于 run 目录并使用 POSIX 分隔符。来源 NPY 保持原样，处理器只读取 capture package 内经过边界校验的文件。
 
 成功执行 PSD 时，manifest 条件性增加 `psd` 对象，并在对应 stage 中记录同一份元数据，输出域为 `psd`。该对象包括规范化参数、执行函数、SciPy 版本、实际采样率、周期窗标记、窗功率增益、窗 SHA-256、完整分段数和丢弃尾点数。窗 SHA-256 使用实际周期窗的 little-endian float64 字节计算。`bin_spacing_hz` 为采样率除以 `nfft`；`segment_frequency_scale_hz` 为采样率除以 `nperseg`，不表示加窗后的等效噪声带宽。
+
+PSD 元数据的 `algorithm` 区分 `welch_segment_mean.v1` 与 `scipy_welch_median.v1`；因果滤波记录 `causal_blocks.v1` 及 `block_samples=4096`。
 
 PSD 元数据同时记录单边密度缩放、`V^2/Hz` 单位和归一化公式。仅有一段或存在尾点时写入警告；后续导出失败仍保留成功 PSD 的元数据。没有成功 PSD 的流水线不增加 `psd` 字段，schema 继续使用 `wavebench.analysis_pipeline.v1`。`measure_band` 在对应 stage 的 `measurement` 中记录选中 bin 数量、间距、积分和边界规则，以及 Welch 平均方式；标量保存为 `<name>_<metric>` 并复用现有 `metrics` 与 `expect`。没有测量算子时 `metrics` 为空映射。HTML 报告显示 Welch 分段参数、警告和导出链接。
 

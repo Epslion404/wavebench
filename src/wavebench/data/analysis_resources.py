@@ -55,7 +55,7 @@ class AnalysisLimits:
         return replace(self, **values)
 
     def evidence(self) -> dict:
-        return {"schema": "wavebench.analysis_resources.v1", "estimator": "conservative.v1",
+        return {"schema": "wavebench.analysis_resources.v1", "estimator": "conservative.v2",
                 "limits": asdict(self), "memory_limit_kind": "estimated_working_set"}
 
 
@@ -122,7 +122,7 @@ class AnalysisBudget:
             self.limits.check("max_fft_length", nfft, op)
             k = max(0, 1 + (count - segment) // (segment - operation["noverlap"]))
             bins = nfft // 2 + 1
-            memory += k * (32 * segment + 64 * bins) + 64 * nfft
+            memory += (1 if operation["average"] == "mean" else k) * (32 * segment + 64 * bins) + 64 * nfft
             work = k * nfft * max(1, nfft.bit_length()) * 8
         elif op == "filter":
             taps = operation.get("numtaps", 2 * operation.get("order", 1) + 1)

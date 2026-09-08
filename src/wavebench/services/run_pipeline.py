@@ -14,6 +14,7 @@ from wavebench.data.analysis_resources import AnalysisBudget, AnalysisLimits, An
 from wavebench.data.analysis_io import load_waveform, BLOCK_ROWS, read_json_bounded
 
 from wavebench.data.signal_pipeline import (
+    FILTER_BLOCK_SAMPLES,
     FrequencySignal,
     FirFilterResult,
     IirFilterResult,
@@ -269,6 +270,8 @@ def execute_pipeline(
                         **signal.parameters,
                         "operation_index": operation_index,
                         "execution_function": "scipy.signal.welch",
+                        "algorithm": ("welch_segment_mean.v1" if operation["average"] == "mean"
+                                      else "scipy_welch_median.v1"),
                         "scipy_version": signal.scipy_version,
                         "sample_rate_hz": rate,
                         "window_periodic": True,
@@ -505,6 +508,8 @@ def _fir_filter_metadata(
         metadata.update({
             "boundary": "zero_initial_state",
             "initial_state": "zeros",
+            "algorithm": "causal_blocks.v1",
+            "block_samples": FILTER_BLOCK_SAMPLES,
         })
     else:
         metadata.update({
@@ -575,6 +580,8 @@ def _iir_filter_metadata(
         metadata.update({
             "boundary": "zero_initial_state",
             "initial_state": "zeros",
+            "algorithm": "causal_blocks.v1",
+            "block_samples": FILTER_BLOCK_SAMPLES,
         })
     else:
         metadata.update({

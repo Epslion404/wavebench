@@ -39,6 +39,7 @@ ANALYSIS_IIR_MAX_ORDER = 12
 ANALYSIS_IIR_MAX_RIPPLE_DB = 20.0
 ANALYSIS_IIR_MAX_ATTENUATION_DB = 200.0
 SIGNIFICANT_PEAK_V = 1e-12
+FILTER_BLOCK_SAMPLES = 4096
 
 
 @dataclass(frozen=True)
@@ -166,12 +167,23 @@ def welch_psd(
         raise DataError("analysis PSD requires SciPy; install WaveBench with `.[analysis]`") from exc
     weights = scipy_signal.get_window(parameters["window"], nperseg, fftbins=True)
     try:
-        frequencies, density = scipy_signal.welch(
-            signal.voltage_v, fs=sample_rate, window=weights, nperseg=nperseg,
-            noverlap=noverlap, nfft=nfft,
-            detrend=False if parameters["detrend"] == "none" else parameters["detrend"],
-            average=parameters["average"], scaling="density", return_onesided=True, axis=-1,
-        )
+        kwargs = dict(fs=sample_rate, window=weights, nperseg=nperseg, nfft=nfft,
+                      detrend=False if parameters["detrend"] == "none" else parameters["detrend"],
+                      scaling="density", return_onesided=True, axis=-1)
+        if parameters["average"] == "mean":
+            density = np.zeros(nfft // 2 + 1, dtype=np.float64)
+            segments = 0
+            for start in range(0, samples - nperseg + 1, nperseg - noverlap):
+                frequencies, segment_density = scipy_signal.welch(
+                    signal.voltage_v[start:start + nperseg], noverlap=0, average="mean", **kwargs,
+                )
+                density += segment_density
+                segments += 1
+            density /= segments
+        else:
+            frequencies, density = scipy_signal.welch(
+                signal.voltage_v, noverlap=noverlap, average="median", **kwargs,
+            )
     except (ValueError, FloatingPointError, OverflowError) as exc:
         raise DataError(f"analysis PSD failed: {exc}") from exc
     if (
@@ -323,7 +335,13 @@ def filter_fir(
             dtype=np.float64,
         )
         if mode == "causal":
-            voltage = scipy_signal.lfilter(taps, [1.0], signal.voltage_v, axis=-1)
+            voltage = np.empty_like(signal.voltage_v)
+            state = np.zeros(numtaps - 1)
+            for start in range(0, voltage.size, FILTER_BLOCK_SAMPLES):
+                block, state = scipy_signal.lfilter(
+                    taps, [1.0], signal.voltage_v[start:start + FILTER_BLOCK_SAMPLES], zi=state,
+                )
+                voltage[start:start + len(block)] = block
         else:
             voltage = scipy_signal.filtfilt(
                 taps,
@@ -428,7 +446,13 @@ def filter_iir(
 
     try:
         if mode == "causal":
-            voltage = scipy_signal.sosfilt(sos, signal.voltage_v, axis=-1, zi=None)
+            voltage = np.empty_like(signal.voltage_v)
+            state = np.zeros((len(sos), 2))
+            for start in range(0, voltage.size, FILTER_BLOCK_SAMPLES):
+                block, state = scipy_signal.sosfilt(
+                    sos, signal.voltage_v[start:start + FILTER_BLOCK_SAMPLES], zi=state,
+                )
+                voltage[start:start + len(block)] = block
         else:
             voltage = scipy_signal.sosfiltfilt(
                 sos,
