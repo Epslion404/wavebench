@@ -43,6 +43,35 @@ def build_parser() -> argparse.ArgumentParser:
     sweep_parser = subparsers.add_parser("sweep", help="Source/scope sweep commands")
     run_parser = subparsers.add_parser("run", help="Multi-instrument run plan commands")
     capture_parser = subparsers.add_parser("capture", help="Offline capture package commands")
+    analysis_parser = subparsers.add_parser("analysis", help="Offline signal processing")
+    analysis_sub = analysis_parser.add_subparsers(dest="command", required=True)
+    for command in ("pair-check", "pair-run"):
+        pair_command = analysis_sub.add_parser(command, help="Evidence-gated two-channel offline analysis")
+        pair_command.add_argument("--capture", required=True)
+        pair_command.add_argument("--recipe", required=True)
+        pair_command.add_argument("--analysis-resources")
+        pair_command.add_argument("--analysis-execution")
+        if command == "pair-run":
+            pair_command.add_argument("--output", required=True)
+    analysis_batch = analysis_sub.add_parser("batch", help="Run or resume an explicit serial analysis batch")
+    analysis_batch.add_argument("--manifest", required=True)
+    analysis_batch.add_argument("--output", required=True)
+    analysis_batch.add_argument("--resume", action="store_true")
+    analysis_batch.add_argument("--analysis-resources")
+    analysis_batch.add_argument("--analysis-execution")
+    analysis_report = analysis_sub.add_parser("report", help="Plot persisted analysis exports")
+    analysis_report.add_argument("paths", nargs="+")
+    analysis_report.add_argument("--output", required=True)
+    analysis_report.add_argument("--analysis-resources", help="Execution resource profile TOML")
+    for command in ("check", "run"):
+        analysis_command = analysis_sub.add_parser(command)
+        analysis_command.add_argument("--capture", required=True)
+        analysis_command.add_argument("--channel", type=int, required=True)
+        analysis_command.add_argument("--recipe", required=True)
+        analysis_command.add_argument("--analysis-resources", help="Execution resource profile TOML")
+        analysis_command.add_argument("--analysis-execution", help="Analysis execution profile TOML")
+        if command == "run":
+            analysis_command.add_argument("--output", required=True)
     mcp_parser = subparsers.add_parser("mcp", help="HTTP MCP server / HTTP MCP 服务")
     tui_parser = subparsers.add_parser("tui", help="Launch terminal UI / 启动终端界面")
     net_parser = subparsers.add_parser("net", help="Network discovery helpers / 网络发现工具")
@@ -376,6 +405,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_check.add_argument("--plan", required=True, help="Path to a WaveBench run plan TOML file")
     add_runtime_options(run_check)
+    run_check.add_argument("--analysis-resources", help="Analysis resource profile TOML")
+    run_check.add_argument("--analysis-execution", help="Analysis execution profile TOML")
     run_intent = run_sub.add_parser(
         "intent",
         help="Build an offline execution intent for a run plan / 为运行计划生成离线执行意图",
@@ -383,12 +414,16 @@ def build_parser() -> argparse.ArgumentParser:
     run_intent.add_argument("--plan", required=True, help="Path to a WaveBench run plan TOML file")
     run_intent.add_argument("--output", default=None, help="Write the execution intent JSON to this path")
     add_runtime_options(run_intent)
+    run_intent.add_argument("--analysis-resources", help="Analysis resource profile TOML")
+    run_intent.add_argument("--analysis-execution", help="Analysis execution profile TOML")
     run_verify = run_sub.add_parser(
         "verify",
         help="Verify / 预检 instruments referenced by a run plan with read-only *IDN? queries",
     )
     run_verify.add_argument("--plan", required=True, help="Path to a WaveBench run plan TOML file")
     add_runtime_options(run_verify)
+    run_verify.add_argument("--analysis-resources", help="Analysis resource profile TOML")
+    run_verify.add_argument("--analysis-execution", help="Analysis execution profile TOML")
     run_sub.add_parser("schema", help="Print supported run plan step kinds and fields")
     run_template = run_sub.add_parser("template", help="Create or print conservative run plan templates")
     run_template.add_argument("template", nargs="?", help="Template name, e.g. source-scope-sine")
@@ -411,6 +446,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_template.add_argument("--voltage", type=float, default=3.3, help="Template power voltage in V")
     run_template.add_argument("--current-limit", type=float, default=0.1, help="Template power current limit in A")
     run_plan = run_sub.add_parser("plan", help="Execute a WaveBench run plan")
+    run_plan.add_argument("--analysis-resources", help="Analysis resource profile TOML")
+    run_plan.add_argument("--analysis-execution", help="Analysis execution profile TOML")
     run_plan.add_argument("--plan", required=True, help="Path to a WaveBench run plan TOML file")
     run_plan.add_argument(
         "--intent",
@@ -479,6 +516,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_resume.add_argument("--response", default=None, help="Frequency-response label for a multi-response run")
     run_resume.add_argument("--output", default=None, help="Write the resume manifest JSON to this path")
     run_report = run_sub.add_parser("report", help="Generate an offline HTML report for a run package")
+    run_report.add_argument("--analysis-resources", help="Resource profile for signal processing curves")
     run_report.add_argument("path", help="Path to data/runs/<run_dir>")
     run_report.add_argument("--output", default=None, help="Output HTML path; defaults to <run_dir>/report.html")
     run_report.add_argument(
@@ -1511,6 +1549,7 @@ def build_parser() -> argparse.ArgumentParser:
     capture = scope_sub.add_parser("capture", help="Capture waveform data into an acquisition package")
     capture.add_argument("--channel", type=int, action="append", default=None, help="Capture channel; repeat for multiple channels")
     capture.add_argument("--label", default="capture")
+    capture.add_argument("--synchronized", action="store_true", help="Require driver-proven single frozen multichannel capture")
     capture.add_argument("--points", default=None, help="Override waveform points: def, max, or dmax")
     capture.add_argument(
         "--time-range",

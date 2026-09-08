@@ -19,6 +19,9 @@ def capture_fft_summary(capture: Any) -> dict[str, Any]:
 
 
 def step_status(artifact: dict[str, Any]) -> str:
+    analysis_pipeline = artifact.get("analysis_pipeline")
+    if isinstance(analysis_pipeline, dict) and analysis_pipeline.get("status") == "failed":
+        return "failed"
     response = artifact.get("frequency_response", {})
     if isinstance(response, dict) and response.get("status") == "failed":
         return "failed"

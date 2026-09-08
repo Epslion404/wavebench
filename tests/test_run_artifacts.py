@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
-from wavebench.services.run_artifacts import RunStepRecord, write_run_files
+from wavebench.services.run_artifacts import RunStepRecord, write_run_files, write_step_record
 from wavebench.services.run_plan import load_run_plan
 from wavebench.services.source_state import RestorableSourceState
 
@@ -116,6 +116,25 @@ def test_nonempty_source_operation_namespace_is_additive_to_v1_run_artifacts() -
         ]
         assert enriched["restore"] == baseline["restore"]
         assert enriched["steps"] == baseline["steps"]
+
+
+def test_step_id_is_conditional_and_does_not_change_step_filename() -> None:
+    with TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        record = RunStepRecord(
+            index=3,
+            kind="analysis.pipeline",
+            status="ok",
+            fields={"source": {"step": "capture_main"}, "operations": []},
+            artifact={"metrics": {}},
+            id="spectrum_main",
+        )
+
+        write_step_record(directory, record)
+
+        path = directory / "03_analysis_pipeline.json"
+        assert path.is_file()
+        assert json.loads(path.read_text(encoding="utf-8"))["id"] == "spectrum_main"
 
 
 @pytest.mark.parametrize(

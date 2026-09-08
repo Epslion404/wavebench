@@ -378,10 +378,20 @@ class TuiDmmBusyBehaviorTests(unittest.IsolatedAsyncioTestCase):
             refresh_interval_s=60.0,
         )
         async with app.run_test() as pilot:
-            await pilot.pause(0.25)
+            # The initial refresh must finish before writes can be accepted.
+            for _ in range(100):
+                await pilot.pause(0.05)
+                if not app._dmm_read_in_flight:
+                    break
+            self.assertFalse(app._dmm_read_in_flight)
             app._set_dmm_function("acv")
+            self.assertTrue(app._dmm_write_in_flight)
             app._set_dmm_function("acv")
-            await pilot.pause(0.5)
+            for _ in range(100):
+                await pilot.pause(0.05)
+                if not app._dmm_write_in_flight:
+                    break
+            self.assertFalse(app._dmm_write_in_flight)
             self.assertEqual(adapter.apply_calls, ["acv"])
             self.assertFalse(app.query_one("#dmm-func-acv", Button).disabled)
 

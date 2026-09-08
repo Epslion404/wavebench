@@ -22,7 +22,7 @@ from wavebench.report.plot3d import (
 from wavebench.report.path_utils import artifact_url
 
 
-def write_run_report_html(run: RunPackage, output_path: str | Path | None = None) -> Path:
+def write_run_report_html(run: RunPackage, output_path: str | Path | None = None, *, analysis_limits=None) -> Path:
     path = Path(output_path) if output_path is not None else run.path / "report.html"
     path.parent.mkdir(parents=True, exist_ok=True)
     has_surface = any(
@@ -32,7 +32,7 @@ def write_run_report_html(run: RunPackage, output_path: str | Path | None = None
     plotly_asset = write_plotly_asset(path.parent) if has_surface else None
     plotly_url = artifact_url(plotly_asset, path.parent) if plotly_asset is not None else None
     path.write_text(
-        render_run_report_html(run, output_dir=path.parent, plotly_url=plotly_url), encoding="utf-8"
+        render_run_report_html(run, output_dir=path.parent, plotly_url=plotly_url, analysis_limits=analysis_limits), encoding="utf-8"
     )
     write_run_report_manifest(
         run, output_dir=path.parent, report_path=path, interactive_asset_path=plotly_asset
@@ -202,6 +202,7 @@ def render_run_report_html(
     *,
     compact: bool = False,
     plotly_url: str | None = None,
+    analysis_limits=None,
 ) -> str:
     experiment = run.run.get("experiment", {}) if isinstance(run.run.get("experiment"), dict) else {}
     restore = run.run.get("restore", {}) if isinstance(run.run.get("restore"), dict) else {}
@@ -233,6 +234,7 @@ def render_run_report_html(
         plotly_url=plotly_url if not compact else None,
     )
     artifact_links_block = "" if compact else _artifact_links_block(artifact_links)
+    signal_processing_block = "" if compact else _signal_processing_block(run, report_output_dir, analysis_limits=analysis_limits)
     signals_block = "" if compact else _signals_block(signals)
     waveform_previews_block = "" if compact else _waveform_previews_block(waveform_previews)
     evidence_summary_block = "" if compact else _evidence_summary_block(evidence)
@@ -249,6 +251,25 @@ def render_run_report_html(
     restore_block = ""
     if restore:
         restore_block = f"<p><b>恢复 / Restore:</b> {escape(str(restore.get('status', 'unknown')))}</p>"
+    provenance = run.run.get("provenance")
+    coverage = provenance.get("source_restore_coverage") if isinstance(provenance, dict) else None
+    if isinstance(coverage, dict):
+        declaration = coverage.get("declaration", {})
+        restored_fields = ", ".join(declaration.get("fields", ()))
+        uncovered = ", ".join(coverage.get("uncovered", ()))
+        restore_block += (
+            "<h2>源恢复范围 / Source restoration coverage</h2>"
+            f"<p>请求恢复 / Requested: {escape(str(coverage.get('requested')))}</p>"
+            f"<p>覆盖字段 / Covered: {escape(restored_fields or 'undeclared')}</p>"
+            f"<p>未覆盖 / Not covered: {escape(uncovered or 'none declared')}</p>"
+        )
+        for result in restore.get("results", []):
+            restore_block += (
+                f"<p>CH{escape(str(result.get('channel')))}: {escape(str(result.get('status')))}"
+                f" {escape(str(result.get('output_override', '')))}</p>"
+            )
+            if result.get("error"):
+                restore_block += f"<pre>{escape(str(result['error']))}</pre>"
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -394,6 +415,7 @@ code {{ background: #f0f4f8; padding: 0.1rem 0.3rem; border-radius: 5px; }}
     {dmm_block}
     {sweep_block}
     {frequency_response_block}
+    {signal_processing_block}
     {acceptance_block}
 {expectations_block}
 {signals_block}
@@ -473,7 +495,7 @@ def _build_report_manifest(
             warnings.append(
                 f"step {reference.step_index}: capture package missing: {reference.package}"
             )
-    return {
+    manifest = {
         "schema": "wavebench.report_manifest.v1",
         "report": artifact_url(report_path, output_dir),
         "run_json": artifact_url(run.run_json_path, output_dir),
@@ -536,6 +558,10 @@ def _build_report_manifest(
         ),
         "warnings": warnings,
     }
+    analysis_pipelines = _analysis_manifest_entries(run, output_dir)
+    if analysis_pipelines:
+        manifest["analysis_pipelines"] = analysis_pipelines
+    return manifest
 
 
 def _summary_block(summary: ReportSummary, *, compact: bool = False) -> str:
@@ -1909,6 +1935,16 @@ def _build_report_summary(
             warning_messages.update(str(item) for item in warnings if item)
         elif warnings:
             warning_messages.add(str(warnings))
+        analysis_pipeline = (
+            artifact.get("analysis_pipeline", {})
+            if isinstance(artifact.get("analysis_pipeline"), dict)
+            else {}
+        )
+        analysis_warnings = analysis_pipeline.get("warnings", [])
+        if isinstance(analysis_warnings, list):
+            warning_messages.update(str(item) for item in analysis_warnings if item)
+        elif analysis_warnings:
+            warning_messages.add(str(analysis_warnings))
         expect = artifact.get("expect", {}) if isinstance(artifact.get("expect"), dict) else {}
         expect_fft = artifact.get("expect_fft", {}) if isinstance(artifact.get("expect_fft"), dict) else {}
         if expect.get("status") == "failed":
@@ -1953,6 +1989,174 @@ def _build_evidence_summary(
         screenshot_count=len(screenshots),
         waveform_preview_count=len(waveform_previews),
     )
+
+
+def _signal_processing_block(run: RunPackage, output_dir: Path, *, analysis_limits=None) -> str:
+    rows: list[str] = []
+    for step in run.steps:
+        if step.get("kind") not in {"analysis.pipeline", "analysis.pair"}:
+            continue
+        artifact = step.get("artifact", {}) if isinstance(step.get("artifact"), dict) else {}
+        pipeline = (
+            artifact.get("analysis_pipeline", {})
+            if isinstance(artifact.get("analysis_pipeline"), dict)
+            else {}
+        )
+        operations = pipeline.get("operations", [])
+        operation_names = (
+            [
+                _analysis_operation_label(operation)
+                for operation in operations
+                if isinstance(operation, dict) and operation.get("op")
+            ]
+            if isinstance(operations, list)
+            else []
+        )
+        metrics = artifact.get("metrics", {}) if isinstance(artifact.get("metrics"), dict) else {}
+        metrics_text = " | ".join(
+            f"{name}={'null' if value is None else _format_plain(value)}"
+            for name, value in metrics.items()
+        )
+        warnings = pipeline.get("warnings", [])
+        warnings_text = (
+            " | ".join(str(item) for item in warnings)
+            if isinstance(warnings, list)
+            else str(warnings or "")
+        )
+        export_links: list[str] = []
+        exports = pipeline.get("exports", [])
+        if isinstance(exports, list):
+            for export in exports:
+                if not isinstance(export, dict) or not isinstance(export.get("path"), str):
+                    continue
+                path = _resolve_run_artifact_path(run.path, export["path"])
+                href = escape(artifact_url(path, output_dir), quote=True)
+                label = escape(f"{export.get('name', '')}.{export.get('format', '')}".strip("."))
+                export_links.append(f'<a class="artifact-link" href="{href}">{label}</a>')
+        manifest_link = _analysis_file_link(
+            run, output_dir, pipeline.get("manifest"), "manifest.json"
+        )
+        metrics_link = _analysis_file_link(
+            run, output_dir, pipeline.get("metrics"), "metrics.json"
+        )
+        links = " ".join(item for item in [manifest_link, metrics_link, *export_links] if item)
+        status = str(pipeline.get("status") or step.get("status") or "")
+        rows.append(
+            "<tr>"
+            f"<td>{escape(str(step.get('index', '')))} · {escape(str(step.get('id', '-')))}</td>"
+            f'<td class="{escape(status)}">{escape(status)}</td>'
+            f"<td>{escape(str(pipeline.get('source_step', '-')))}</td>"
+            f"<td>{escape(' → '.join(operation_names))}</td>"
+            f"<td>{escape(metrics_text)}</td>"
+            f"<td>{escape(warnings_text)}</td>"
+            f"<td>{escape(str(pipeline.get('failed_stage', '')))}</td>"
+            f"<td>{links}</td>"
+            "</tr>"
+        )
+    if not rows:
+        return ""
+    from .analysis import render_analysis_sections
+
+    curves = render_analysis_sections([
+        (run.path, str(step.get("id", step["index"])), step.get("artifact", {}))
+        for step in run.steps if step.get("kind") in {"analysis.pipeline", "analysis.pair"}
+    ], details=False, resource_limits=analysis_limits)
+    return f"""<h2>信号处理 / Signal processing</h2>
+<div class="table compact-table"><table>
+<thead><tr><th>步骤 / Step</th><th>状态 / Status</th><th>来源 / Source</th><th>算子 / Operations</th><th>指标 / Metrics</th><th>警告 / Warnings</th><th>失败阶段 / Failed stage</th><th>产物 / Artifacts</th></tr></thead>
+<tbody>
+{chr(10).join(rows)}
+</tbody>
+</table></div>
+{curves}
+"""
+
+
+def _analysis_operation_label(operation: dict[str, Any]) -> str:
+    op = str(operation.get("op", ""))
+    if op in {"smooth", "resample", "measure_band", "peaks"}:
+        return op + "(" + ", ".join(
+            f"{key}={value}" for key, value in operation.items() if key != "op"
+        ) + ")"
+    if op == "psd":
+        return "psd(" + ", ".join(
+            f"{key}={operation.get(key, '')}"
+            for key in ("method", "window", "nperseg", "noverlap", "nfft", "detrend", "average")
+        ) + ")"
+    if op != "filter":
+        return op
+    cutoff = operation.get("cutoff_hz")
+    if isinstance(cutoff, list):
+        cutoff_text = "–".join(_format_plain(value) for value in cutoff)
+    else:
+        cutoff_text = _format_plain(cutoff)
+    family = operation.get("family", "")
+    if family == "fir":
+        details = f"{operation.get('numtaps', '')} taps"
+    else:
+        details = f"{operation.get('design', '')}, order {operation.get('order', '')}"
+    return (
+        f"filter({family}, {operation.get('response', '')}, {cutoff_text} Hz, "
+        f"{details}, {operation.get('mode', '')})"
+    )
+
+
+def _analysis_file_link(
+    run: RunPackage,
+    output_dir: Path,
+    raw_path: Any,
+    label: str,
+) -> str:
+    if not isinstance(raw_path, str) or not raw_path:
+        return ""
+    path = _resolve_run_artifact_path(run.path, raw_path)
+    href = escape(artifact_url(path, output_dir), quote=True)
+    return f'<a class="artifact-link" href="{href}">{escape(label)}</a>'
+
+
+def _analysis_manifest_entries(run: RunPackage, output_dir: Path) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for step in run.steps:
+        if step.get("kind") not in {"analysis.pipeline", "analysis.pair"}:
+            continue
+        artifact = step.get("artifact", {}) if isinstance(step.get("artifact"), dict) else {}
+        pipeline = (
+            artifact.get("analysis_pipeline", {})
+            if isinstance(artifact.get("analysis_pipeline"), dict)
+            else {}
+        )
+        manifest_path = _optional_run_artifact_path(run.path, pipeline.get("manifest"))
+        metrics_path = _optional_run_artifact_path(run.path, pipeline.get("metrics"))
+        export_entries: list[dict[str, Any]] = []
+        exports = pipeline.get("exports", [])
+        if isinstance(exports, list):
+            for raw_export in exports:
+                if not isinstance(raw_export, dict):
+                    continue
+                path = _optional_run_artifact_path(run.path, raw_export.get("path"))
+                if path is None:
+                    continue
+                export_entries.append({
+                    "name": raw_export.get("name"),
+                    "format": raw_export.get("format"),
+                    "path": artifact_url(path, output_dir),
+                    "exists": path.is_file(),
+                    "sha256": raw_export.get("sha256"),
+                })
+        entries.append({
+            "step_index": step.get("index"),
+            "step_id": step.get("id"),
+            "status": pipeline.get("status", step.get("status")),
+            "source_step": pipeline.get("source_step"),
+            "manifest": artifact_url(manifest_path, output_dir) if manifest_path is not None else None,
+            "manifest_exists": manifest_path.is_file() if manifest_path is not None else False,
+            "metrics": artifact_url(metrics_path, output_dir) if metrics_path is not None else None,
+            "metrics_exists": metrics_path.is_file() if metrics_path is not None else False,
+            "warnings": pipeline.get("warnings", []),
+            "failed_stage": pipeline.get("failed_stage"),
+            "exports": export_entries,
+        })
+    return entries
 
 
 def _collect_artifact_links(
@@ -2083,6 +2287,50 @@ def _collect_artifact_links(
                     label=f"ch{channel} {npy_name}",
                     href=artifact_url(npy_path, output_dir),
                     status=_availability_text(True),
+                )
+            )
+    for step in run.steps:
+        if step.get("kind") not in {"analysis.pipeline", "analysis.pair"}:
+            continue
+        artifact = step.get("artifact", {}) if isinstance(step.get("artifact"), dict) else {}
+        pipeline = (
+            artifact.get("analysis_pipeline", {})
+            if isinstance(artifact.get("analysis_pipeline"), dict)
+            else {}
+        )
+        step_index = str(step.get("index", ""))
+        for field, kind, label in (
+            ("manifest", "处理清单 / Processing manifest", "manifest.json"),
+            ("metrics", "分析指标 / Analysis metrics", "metrics.json"),
+        ):
+            path = _optional_run_artifact_path(run.path, pipeline.get(field))
+            if path is None:
+                continue
+            links.append(
+                ReportArtifactLink(
+                    step_index=step_index,
+                    kind=kind,
+                    label=label,
+                    href=artifact_url(path, output_dir),
+                    status=_availability_text(path.is_file()),
+                )
+            )
+        exports = pipeline.get("exports", [])
+        if not isinstance(exports, list):
+            continue
+        for export in exports:
+            if not isinstance(export, dict):
+                continue
+            path = _optional_run_artifact_path(run.path, export.get("path"))
+            if path is None:
+                continue
+            links.append(
+                ReportArtifactLink(
+                    step_index=step_index,
+                    kind="处理导出 / Processing export",
+                    label=path.name,
+                    href=artifact_url(path, output_dir),
+                    status=_availability_text(path.is_file()),
                 )
             )
     return links
@@ -2476,6 +2724,18 @@ def _resolve_artifact_path(run_path: Path, artifact_path: str) -> Path:
         return path
     root = _project_root_from_run_path(run_path)
     return root / path
+
+
+def _resolve_run_artifact_path(run_path: Path, artifact_path: str) -> Path:
+    normalized = artifact_path.replace("\\", "/")
+    path = Path(normalized)
+    return path if path.is_absolute() else run_path / path
+
+
+def _optional_run_artifact_path(run_path: Path, raw_path: Any) -> Path | None:
+    if not isinstance(raw_path, str) or not raw_path:
+        return None
+    return _resolve_run_artifact_path(run_path, raw_path)
 
 
 def _project_root_from_run_path(run_path: Path) -> Path:

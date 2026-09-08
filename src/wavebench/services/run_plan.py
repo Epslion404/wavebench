@@ -9,7 +9,21 @@ from typing import Any
 import tomllib
 
 from wavebench.config import normalize_waveform_points
-from wavebench.errors import ConfigError
+from wavebench.data.signal_pipeline import (
+    ANALYSIS_FIR_MODES,
+    ANALYSIS_FIR_RESPONSES,
+    ANALYSIS_FREQUENCY_METRICS,
+    ANALYSIS_IIR_DESIGNS,
+    ANALYSIS_IIR_MAX_ATTENUATION_DB,
+    ANALYSIS_IIR_MAX_ORDER,
+    ANALYSIS_IIR_MAX_RIPPLE_DB,
+    ANALYSIS_TIME_METRICS,
+    normalize_psd_parameters,
+)
+from wavebench.errors import ConfigError, DataError
+from wavebench.data.pipeline_operations import (
+    normalize_band, normalize_peaks, normalize_smooth, normalize_resample,
+)
 from wavebench.services.frequency_response import FIT_METHODS
 from wavebench.services.frequency_response_adaptive import normalize_frequency_response_adaptive
 from wavebench.services.frequency_response_baseline import normalize_frequency_response_baseline
@@ -17,6 +31,8 @@ from wavebench.services.frequency_response_calibration import normalize_frequenc
 
 
 ALLOWED_STEP_KINDS = {
+    "analysis.pipeline",
+    "analysis.pair",
     "scope.auto",
     "scope.capture",
     "sweep.frequency_response",
@@ -75,8 +91,12 @@ ALLOWED_STEP_KINDS = {
 
 _SOURCE_STORAGE_TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,96}$")
 _SOURCE_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_STEP_ID = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+_ANALYSIS_EXPORT_NAME = _STEP_ID
 
 _REQUIRED_FIELDS = {
+    "analysis.pipeline": ("source", "operations"),
+    "analysis.pair": ("source", "reference_channel", "response_channel", "operations"),
     "power.set": ("voltage_v", "current_limit_a"),
     "power.output": ("state",),
     "source.set_freq": ("frequency_hz",),
@@ -172,9 +192,11 @@ _REQUIRED_FIELDS = {
 }
 
 _OPTIONAL_FIELDS = {
+    "analysis.pipeline": {"expect", "on_failure", "resources"},
+    "analysis.pair": {"expect", "on_failure", "resources"},
     "scope.auto": {"on_failure"},
     "scope.capture": {
-        "channel",
+        "channel", "channels", "synchronized",
         "label",
         "points",
         "time_range_s",
@@ -314,11 +336,15 @@ _OPTIONAL_FIELDS = {
 # Failure handling is a common contract for every executable step.  Keeping the
 # fields in the schema table makes ``run schema`` and unknown-key diagnostics stay
 # in sync as new step kinds are added.
-for _step_fields in _OPTIONAL_FIELDS.values():
-    _step_fields.update({"on_failure", "safety_gate"})
+for _step_kind, _step_fields in _OPTIONAL_FIELDS.items():
+    _step_fields.add("on_failure")
+    if _step_kind not in {"analysis.pipeline", "analysis.pair"}:
+        _step_fields.add("safety_gate")
 
 
 _STEP_NOTES = {
+    "analysis.pair": "Analyze two evidence-validated channels from one earlier capture package after hardware cleanup. Accepts synthetic or driver-owned frozen-single synchronization evidence.",
+    "analysis.pipeline": "Process one earlier scope.capture NPY after all hardware sessions close. Uses a validated linear operator list, checks optional dependencies on demand, and never opens an instrument.",
     "scope.auto": "Explicit RTM2032 AUToscale. It changes front-panel settings and is never inserted implicitly.",
     "scope.capture": "Trigger one acquisition, write a capture package, and optionally evaluate quality/expect checks. Use target_vpp or vertical_scale_v_per_div to fit the waveform vertically before capture.",
     "sweep.frequency_response": "Sweep a source through discrete frequencies, capture reference and response channels in one acquisition per point, and write a Bode response CSV.",
@@ -416,6 +442,7 @@ def format_run_plan_schema() -> str:
         "  [safety] optional: scope_guard_channel, require_scope_coupling_not, allow_50ohm, safety_gate, off_source_channels, off_power_channels",
         "  [restore] optional: source_state, source_channel, source_channels",
         "  [[steps]] required: kind",
+        "  [[steps]] optional structural field: id matching ^[a-z][a-z0-9_-]{0,63}$",
         "",
         "Supported step kinds:",
     ]
@@ -435,6 +462,30 @@ def format_run_plan_schema() -> str:
         "scope.capture [steps.expect_fft] metrics:",
         "  FFT checks analyze the saved NPY waveform.",
         "  Common metrics: peak_frequency_hz, peak_amplitude_v, thd_ratio, harmonic_2_amplitude_v.",
+        "",
+        "analysis.pipeline metrics:",
+        "  Optional [steps.resources] tightens the execution resource profile; --analysis-resources selects an explicit environment TOML profile.",
+        "  Default resource admission bounds FIR taps, FFT length, working-set estimate, cumulative work/output and file counts before allocation. Actual source length is checked offline after capture.",
+        "  Time domain: voltage_min_v, voltage_max_v, voltage_mean_v, voltage_rms_v, voltage_vpp_v.",
+        "  Frequency domain: peak_frequency_hz, peak_amplitude_v, noise_floor_v, thd_ratio, and harmonic_2 through harmonic_5 frequency/amplitude fields.",
+        "  PSD domain: measure_band requires name, band_hz, exclude_hz and metrics=mean_square_v2|rms_v|noise_rms_v. Metric keys are <name>_<metric>.",
+        "",
+        "  scope.capture synchronized=true requires channels=[1,2], save_npy=true and DEF points; single-channel quality/auto-retry fields are not accepted. Requires scope.capture_synchronized capability.",
+        "analysis.pair: reference_channel and response_channel must be distinct; source uses one earlier scope.capture with explicit save_npy=true.",
+        "  Pair operations: delay (integer lag), transfer (mean Welch H1/coherence), export. Synthetic and driver_frozen_single evidence are accepted.",
+        "  spectral_quality requires explicit integration bands, fundamental mode, harmonic orders, detection thresholds and metrics; only mean Welch PSD is accepted.",
+        "  Quality metrics: snr_db, sinad_db, sfdr_db, thdn_ratio, fundamental_frequency_hz, fundamental_power_v2, harmonic_power_v2, noise_power_v2, noise_bandwidth_hz, spur_frequency_hz, spur_power_v2, spur_dbc.",
+        "analysis.pipeline PSD operation:",
+        "  psd requires method=welch, window=hann|hamming|blackman, nperseg>=4, 0<=noverlap<nperseg, nfft>=nperseg, detrend=none|constant|linear, average=mean|median.",
+        "  All parameters are explicit; lengths are integers. Segment windows are periodic.",
+        "  Requires time data before window or fft. Only export, measure_band, spectral_quality or peaks may follow psd; at least one PSD result is required.",
+        "  Requires optional SciPy. Exports frequency_hz,psd_v2_per_hz with one-sided density scaling.",
+        "  peaks requires name, polarity=positive|negative|both, height>=0, prominence>=0, distance>0, width>=0, max_peaks=1..10000, metrics=[count].",
+        "  Peak distance/width use seconds in time and Hz in spectra; spectral polarity must be positive. Produces <name>_count and JSON/CSV tables without changing signal domain.",
+        "  smooth requires method=moving_average|savgol, odd window_length=3..1001, mode=centered|causal, boundary=reflect|edge. Causal requires edge.",
+        "  savgol requires polyorder=0..min(5,window_length-1); moving_average rejects polyorder. Smooth requires uniform time data before window/fft/psd.",
+        "  resample requires positive integer up/down (reduced factors <=10000), window=kaiser, beta=0..30, padtype=constant|line. Output is limited to 20000000 samples.",
+        "  Resample requires uniform time data before window/fft/psd; preserves time origin, uses a pinned polyphase FIR design and updates downstream sampling metadata.",
     ])
     return "\n".join(lines)
 
@@ -464,6 +515,7 @@ class RunStep:
     index: int
     kind: str
     fields: dict[str, Any]
+    id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -503,6 +555,7 @@ def load_run_plan(path: str | Path) -> RunPlan:
         raise ConfigError("run plan requires at least one [[steps]] entry")
     steps = [_parse_step(index, item) for index, item in enumerate(steps_raw)]
     _validate_frequency_response_steps(steps)
+    _validate_analysis_steps(steps)
     return RunPlan(path=plan_path, name=name, label=label, safety=safety, restore=restore, steps=steps)
 
 
@@ -639,7 +692,7 @@ def _parse_step(index: int, raw: Any) -> RunStep:
         )
 
     schema = STEP_SCHEMAS[kind]
-    allowed_fields = {"kind", *schema.required, *schema.optional}
+    allowed_fields = {"id", "kind", *schema.required, *schema.optional}
     _reject_unknown_keys(table, allowed_fields, f"steps[{index}]")
     for field in schema.required:
         if field not in table:
@@ -651,9 +704,10 @@ def _parse_step(index: int, raw: Any) -> RunStep:
                 "Run `python -m wavebench run schema` for examples."
             )
 
-    fields = {key: value for key, value in table.items() if key != "kind"}
+    step_id = _normalize_step_id(table["id"], f"steps[{index}].id") if "id" in table else None
+    fields = {key: value for key, value in table.items() if key not in {"id", "kind"}}
     _normalize_step_fields(index, kind, fields)
-    return RunStep(index=index, kind=kind, fields=fields)
+    return RunStep(index=index, kind=kind, fields=fields, id=step_id)
 
 
 def _normalize_step_fields(index: int, kind: str, fields: dict[str, Any]) -> None:
@@ -669,7 +723,20 @@ def _normalize_step_fields(index: int, kind: str, fields: dict[str, Any]) -> Non
         )
     if "channel" in fields:
         fields["channel"] = _positive_int(fields["channel"], f"{prefix}.channel")
-    if kind == "scope.capture":
+    if kind in {"analysis.pipeline", "analysis.pair"}:
+        _normalize_analysis_pipeline_fields(prefix, fields, pair=kind == "analysis.pair")
+    elif kind == "scope.capture":
+        if "synchronized" in fields and type(fields['synchronized']) is not bool:
+            raise ConfigError('scope.capture synchronized must be boolean')
+        if "channels" in fields or fields.get('synchronized'):
+            if fields.get('synchronized') is not True or fields.get('channels') != [1, 2] or any(type(ch) is not int for ch in fields['channels']):
+                raise ConfigError('synchronized scope.capture requires channels=[1,2]')
+            forbidden = {'channel', 'quality_gate', 'auto_recover', 'autoscale_before_capture', 'expect', 'expect_fft'} & set(fields)
+            if forbidden:
+                raise ConfigError('synchronized scope.capture does not accept single-channel quality/retry fields')
+            if fields.get('save_npy') is not True or not isinstance(fields.get('points', 'DEF'), str) or fields.get('points', 'DEF').upper() != 'DEF':
+                raise ConfigError('synchronized scope.capture requires save_npy=true and DEF points')
+            fields['points'] = 'DEF'
         if "label" in fields:
             fields["label"] = _non_empty_str(fields["label"], f"{prefix}.label")
         if "points" in fields:
@@ -1182,6 +1249,464 @@ def _validate_frequency_response_steps(steps: list[RunStep]) -> None:
         if label in labels:
             raise ConfigError(f"sweep.frequency_response labels must be unique: {label!r}")
         labels.add(label)
+
+
+def _validate_analysis_steps(steps: list[RunStep]) -> None:
+    by_id: dict[str, RunStep] = {}
+    for step in steps:
+        if step.id is None:
+            continue
+        if step.id in by_id:
+            raise ConfigError(f"duplicate step id: {step.id!r}")
+        by_id[step.id] = step
+
+    for step in steps:
+        if step.kind not in {"analysis.pipeline", "analysis.pair"}:
+            continue
+        source_id = step.fields["source"]["step"]
+        source = by_id.get(source_id)
+        if source is None:
+            raise ConfigError(
+                f"steps[{step.index}].source references unknown step id {source_id!r}"
+            )
+        if source.index >= step.index:
+            raise ConfigError(
+                f"steps[{step.index}].source must reference an earlier step"
+            )
+        if source.kind != "scope.capture":
+            raise ConfigError(
+                f"steps[{step.index}].source must reference a scope.capture step"
+            )
+        if source.fields.get("save_npy") is not True:
+            raise ConfigError(
+                f"steps[{step.index}].source scope.capture must explicitly set save_npy = true"
+            )
+
+    analysis_started = False
+    for step in steps:
+        if step.kind in {"analysis.pipeline", "analysis.pair"}:
+            analysis_started = True
+        elif analysis_started:
+            raise ConfigError("analysis.pipeline steps must form a contiguous suffix of the plan")
+
+
+def _normalize_step_id(value: Any, name: str) -> str:
+    if not isinstance(value, str) or _STEP_ID.fullmatch(value) is None:
+        raise ConfigError(f"{name} must match ^[a-z][a-z0-9_-]{{0,63}}$")
+    return value
+
+
+def _normalize_analysis_pipeline_fields(prefix: str, fields: dict[str, Any], *, pair=False) -> None:
+    source = _table(fields["source"], f"{prefix}.source")
+    _reject_unknown_keys(source, {"step"}, f"{prefix}.source")
+    if "step" not in source:
+        raise ConfigError(f"{prefix}.source.step is required")
+    fields["source"] = {
+        "step": _normalize_step_id(source["step"], f"{prefix}.source.step")
+    }
+    if pair:
+        from .pair_service import normalize_pair_fields
+        normalize_pair_fields(fields)
+    else:
+        normalize_analysis_operations(prefix, fields)
+
+
+def normalize_analysis_operations(prefix: str, fields: dict[str, Any]) -> None:
+    from wavebench.data.spectral_quality import QUALITY_FIELDS, normalize_quality
+    if "resources" in fields:
+        from wavebench.data.analysis_resources import normalize_limits
+
+        fields["resources"] = normalize_limits(fields["resources"])
+
+    raw_operations = fields["operations"]
+    if not isinstance(raw_operations, list) or not raw_operations:
+        raise ConfigError(f"{prefix}.operations must be a non-empty array")
+
+    normalized: list[dict[str, Any]] = []
+    transforms: set[str] = set()
+    measured: set[str] = set()
+    result_names: set[str] = set()
+    export_names: set[str] = set()
+    domain = "time"
+    has_result = False
+    psd_result = False
+
+    allowed_fields = {
+        "spectral_quality": QUALITY_FIELDS,
+        "remove_dc": {"op"},
+        "detrend": {"op", "method"},
+        "filter": {
+            "op",
+            "family",
+            "design",
+            "response",
+            "cutoff_hz",
+            "numtaps",
+            "order",
+            "ripple_db",
+            "attenuation_db",
+            "mode",
+        },
+        "window": {"op", "name"},
+        "fft": {"op"},
+        "psd": {"op", "method", "window", "nperseg", "noverlap", "nfft", "detrend", "average"},
+        "measure": {"op", "metrics"},
+        "measure_band": {"op", "name", "band_hz", "exclude_hz", "metrics"},
+        "peaks": {"op", "name", "polarity", "height", "prominence", "distance", "width", "max_peaks", "metrics"},
+        "smooth": {"op", "method", "window_length", "polyorder", "mode", "boundary"},
+        "resample": {"op", "up", "down", "window", "beta", "padtype"},
+        "export": {"op", "name", "formats"},
+    }
+    required_fields = {
+        "spectral_quality": QUALITY_FIELDS - {"op"},
+        "detrend": {"method"},
+        "filter": {"family", "response", "cutoff_hz", "mode"},
+        "window": {"name"},
+        "psd": {"method", "window", "nperseg", "noverlap", "nfft", "detrend", "average"},
+        "measure": {"metrics"},
+        "measure_band": {"name", "band_hz", "exclude_hz", "metrics"},
+        "peaks": {"name", "polarity", "height", "prominence", "distance", "width", "max_peaks", "metrics"},
+        "smooth": {"method", "window_length", "mode", "boundary"},
+        "resample": {"up", "down", "window", "beta", "padtype"},
+        "export": {"name", "formats"},
+    }
+
+    for operation_index, raw_operation in enumerate(raw_operations):
+        operation_prefix = f"{prefix}.operations[{operation_index}]"
+        if not isinstance(raw_operation, dict):
+            raise ConfigError(f"{operation_prefix} operation must be a TOML table")
+        raw_op = raw_operation.get("op")
+        if not isinstance(raw_op, str) or not raw_op.strip():
+            raise ConfigError(f"{operation_prefix}.op must be a non-empty string")
+        op = raw_op.strip().lower()
+        if op not in allowed_fields:
+            raise ConfigError(f"{operation_prefix} has unsupported op {op!r}")
+
+        unknown = sorted(set(raw_operation) - allowed_fields[op])
+        if unknown:
+            names = ", ".join(repr(name) for name in unknown)
+            raise ConfigError(f"{operation_prefix} {op} has unknown field {names}")
+        missing = sorted(required_fields.get(op, set()) - set(raw_operation))
+        if missing:
+            names = ", ".join(repr(name) for name in missing)
+            raise ConfigError(f"{operation_prefix} {op} missing required field {names}")
+
+        operation: dict[str, Any] = {"op": op}
+        if domain == "psd" and op not in {"export", "measure_band", "peaks", "spectral_quality"}:
+            raise ConfigError(f"{operation_prefix}: only export, measure_band or peaks is supported after psd")
+        if op == "psd":
+            if domain != "time" or "window" in transforms:
+                raise ConfigError(f"{operation_prefix}: psd requires time data before window or fft")
+        if op in {"remove_dc", "detrend", "window", "fft"}:
+            if op in transforms:
+                raise ConfigError(f"{prefix} operation {op!r} may appear at most once")
+            if op in {"remove_dc", "detrend"} and transforms & {"remove_dc", "detrend"}:
+                raise ConfigError(f"{prefix} remove_dc and detrend are mutually exclusive")
+            if domain == "frequency":
+                raise ConfigError(f"{prefix} operation {op!r} must appear before fft")
+            if op in {"remove_dc", "detrend"} and "window" in transforms:
+                raise ConfigError(f"{prefix} operation {op!r} must appear before window")
+            transforms.add(op)
+
+        if op in {"smooth", "resample"}:
+            if domain != "time" or "window" in transforms:
+                raise ConfigError(f"{operation_prefix}: {op} requires time data before window or fft")
+            try:
+                operation = (normalize_smooth(raw_operation) if op == "smooth"
+                             else normalize_resample(raw_operation))
+            except DataError as exc:
+                raise ConfigError(f"{operation_prefix}: {exc}") from exc
+        if op == "filter":
+            if domain == "frequency":
+                raise ConfigError(f"{prefix} operation 'filter' must appear before fft")
+            if "window" in transforms:
+                raise ConfigError(f"{prefix} operation 'filter' must appear before window")
+
+        if op == "filter":
+            family = raw_operation["family"]
+            if not isinstance(family, str) or family.strip().lower() not in {"fir", "iir"}:
+                raise ConfigError(f"{operation_prefix}.family must be 'fir' or 'iir'")
+            family = family.strip().lower()
+            if family == "fir":
+                _validate_analysis_filter_fields(
+                    raw_operation,
+                    allowed={"op", "family", "response", "cutoff_hz", "numtaps", "mode"},
+                    required={"numtaps"},
+                    prefix=operation_prefix,
+                )
+                design = None
+            else:
+                _validate_analysis_filter_fields(
+                    raw_operation,
+                    allowed=set(raw_operation),
+                    required={"design", "order"},
+                    prefix=operation_prefix,
+                )
+                raw_design = raw_operation["design"]
+                if (
+                    not isinstance(raw_design, str)
+                    or raw_design.strip().lower() not in ANALYSIS_IIR_DESIGNS
+                ):
+                    raise ConfigError(
+                        f"{operation_prefix}.design must be one of "
+                        "butterworth, chebyshev1, chebyshev2, elliptic"
+                    )
+                design = raw_design.strip().lower()
+                design_fields = {
+                    "butterworth": set(),
+                    "chebyshev1": {"ripple_db"},
+                    "chebyshev2": {"attenuation_db"},
+                    "elliptic": {"ripple_db", "attenuation_db"},
+                }[design]
+                _validate_analysis_filter_fields(
+                    raw_operation,
+                    allowed={
+                        "op",
+                        "family",
+                        "design",
+                        "response",
+                        "cutoff_hz",
+                        "order",
+                        "mode",
+                        *design_fields,
+                    },
+                    required=design_fields,
+                    prefix=operation_prefix,
+                )
+            response = raw_operation["response"]
+            if (
+                not isinstance(response, str)
+                or response.strip().lower() not in ANALYSIS_FIR_RESPONSES
+            ):
+                raise ConfigError(
+                    f"{operation_prefix}.response must be one of "
+                    "lowpass, highpass, bandpass, bandstop"
+                )
+            response = response.strip().lower()
+            cutoff = _normalize_analysis_filter_cutoff(
+                raw_operation["cutoff_hz"],
+                response=response,
+                name=f"{operation_prefix}.cutoff_hz",
+            )
+            mode = raw_operation["mode"]
+            if not isinstance(mode, str) or mode.strip().lower() not in ANALYSIS_FIR_MODES:
+                raise ConfigError(
+                    f"{operation_prefix}.mode must be 'causal' or 'zero_phase'"
+                )
+            normalized_mode = mode.strip().lower()
+            if family == "fir":
+                numtaps = raw_operation["numtaps"]
+                if (
+                    isinstance(numtaps, bool)
+                    or not isinstance(numtaps, int)
+                    or numtaps < 3
+                    or numtaps % 2 == 0
+                ):
+                    raise ConfigError(
+                        f"{operation_prefix}.numtaps must be an odd integer >= 3"
+                    )
+                operation = {
+                    "op": "filter",
+                    "family": "fir",
+                    "response": response,
+                    "cutoff_hz": cutoff,
+                    "numtaps": numtaps,
+                    "mode": normalized_mode,
+                }
+            else:
+                order = raw_operation["order"]
+                if (
+                    isinstance(order, bool)
+                    or not isinstance(order, int)
+                    or not 1 <= order <= ANALYSIS_IIR_MAX_ORDER
+                ):
+                    raise ConfigError(
+                        f"{operation_prefix}.order must be an integer from 1 to "
+                        f"{ANALYSIS_IIR_MAX_ORDER}"
+                    )
+                operation = {
+                    "op": "filter",
+                    "family": "iir",
+                    "design": design,
+                    "response": response,
+                    "cutoff_hz": cutoff,
+                    "order": order,
+                }
+                if "ripple_db" in raw_operation:
+                    operation["ripple_db"] = _analysis_bounded_positive_float(
+                        raw_operation["ripple_db"],
+                        f"{operation_prefix}.ripple_db",
+                        maximum=ANALYSIS_IIR_MAX_RIPPLE_DB,
+                    )
+                if "attenuation_db" in raw_operation:
+                    operation["attenuation_db"] = _analysis_bounded_positive_float(
+                        raw_operation["attenuation_db"],
+                        f"{operation_prefix}.attenuation_db",
+                        maximum=ANALYSIS_IIR_MAX_ATTENUATION_DB,
+                    )
+                if (
+                    design == "elliptic"
+                    and operation["ripple_db"] >= operation["attenuation_db"]
+                ):
+                    raise ConfigError(
+                        f"{operation_prefix}.ripple_db must be less than attenuation_db"
+                    )
+                operation["mode"] = normalized_mode
+        elif op == "detrend":
+            method = raw_operation["method"]
+            if not isinstance(method, str) or method.lower() != "linear":
+                raise ConfigError(f"{operation_prefix}.method must be 'linear'")
+            operation["method"] = "linear"
+        elif op == "window":
+            name = raw_operation["name"]
+            if not isinstance(name, str) or name.lower() not in {"hann", "hamming", "blackman"}:
+                raise ConfigError(
+                    f"{operation_prefix}.name must be one of hann, hamming, blackman"
+                )
+            operation["name"] = name.lower()
+        elif op == "fft":
+            domain = "frequency"
+        elif op == "psd":
+            try:
+                operation.update(normalize_psd_parameters(
+                    **{key: value for key, value in raw_operation.items() if key != "op"}
+                ))
+            except DataError as exc:
+                raise ConfigError(f"{operation_prefix}: {exc}") from exc
+            domain = "psd"
+        elif op in {"measure_band", "peaks", "spectral_quality"}:
+            if op in {"measure_band", "spectral_quality"} and domain != "psd":
+                raise ConfigError(f"{operation_prefix}: measure_band requires PSD data")
+            try:
+                operation = (normalize_quality(raw_operation) if op == "spectral_quality" else
+                             normalize_band(raw_operation) if op == "measure_band" else normalize_peaks(raw_operation))
+                if op == "spectral_quality" and next(item for item in reversed(normalized) if item["op"] == "psd")["average"] != "mean":
+                    raise DataError("spectral_quality requires mean Welch PSD")
+            except DataError as exc:
+                raise ConfigError(f"{operation_prefix}: {exc}") from exc
+            if op == "peaks" and domain != "time" and operation["polarity"] != "positive":
+                raise ConfigError(f"{operation_prefix}: spectral peaks require positive polarity")
+            keys = {f"{operation['name']}_{metric}" for metric in operation["metrics"]}
+            if keys & measured or operation["name"] in result_names:
+                raise ConfigError(f"{operation_prefix}: duplicate measurement name")
+            result_names.add(operation["name"])
+            measured.update(keys)
+            has_result = True
+            psd_result = psd_result or domain == "psd"
+        elif op == "measure":
+            raw_metrics = raw_operation["metrics"]
+            if not isinstance(raw_metrics, list) or not raw_metrics:
+                raise ConfigError(f"{operation_prefix}.metrics must be a non-empty array")
+            metrics: list[str] = []
+            permitted = ANALYSIS_TIME_METRICS if domain == "time" else ANALYSIS_FREQUENCY_METRICS
+            for raw_metric in raw_metrics:
+                if not isinstance(raw_metric, str) or not raw_metric:
+                    raise ConfigError(f"{operation_prefix}.metrics entries must be non-empty strings")
+                metric = raw_metric
+                if metric not in permitted:
+                    other_domain = (
+                        metric in ANALYSIS_FREQUENCY_METRICS
+                        if domain == "time"
+                        else metric in ANALYSIS_TIME_METRICS
+                    )
+                    if other_domain:
+                        raise ConfigError(
+                            f"{operation_prefix} metric {metric!r} requires "
+                            f"{'frequency' if domain == 'time' else 'time'}-domain data"
+                        )
+                    raise ConfigError(f"{operation_prefix} has unsupported metric {metric!r}")
+                if metric in measured:
+                    raise ConfigError(f"{prefix} has duplicate metric {metric!r}")
+                measured.add(metric)
+                metrics.append(metric)
+            operation["metrics"] = metrics
+            has_result = True
+        elif op == "export":
+            name = raw_operation["name"]
+            if not isinstance(name, str) or _ANALYSIS_EXPORT_NAME.fullmatch(name) is None:
+                raise ConfigError(
+                    f"{operation_prefix}.name must match ^[a-z][a-z0-9_-]{{0,63}}$"
+                )
+            if name in export_names:
+                raise ConfigError(f"{prefix} has duplicate export name {name!r}")
+            export_names.add(name)
+            raw_formats = raw_operation["formats"]
+            if not isinstance(raw_formats, list) or not raw_formats:
+                raise ConfigError(f"{operation_prefix}.formats must be a non-empty array")
+            formats: list[str] = []
+            for raw_format in raw_formats:
+                if not isinstance(raw_format, str) or raw_format.lower() not in {"npy", "csv"}:
+                    raise ConfigError(f"{operation_prefix} format must be one of npy, csv")
+                file_format = raw_format.lower()
+                if file_format in formats:
+                    raise ConfigError(f"{operation_prefix} has duplicate export format {file_format!r}")
+                formats.append(file_format)
+            operation["name"] = name
+            operation["formats"] = formats
+            has_result = True
+            psd_result = psd_result or domain == "psd"
+        normalized.append(operation)
+
+    if not has_result:
+        raise ConfigError(f"{prefix}.operations requires at least one measure or export operation")
+    if domain == "psd" and not psd_result:
+        raise ConfigError(f"{prefix}.operations requires export, measure_band or peaks after psd")
+    fields["operations"] = normalized
+
+    if "expect" in fields:
+        expect = _parse_expect(fields["expect"], f"{prefix}.expect")
+        unavailable = sorted(set(expect) - measured)
+        if unavailable:
+            raise ConfigError(
+                f"{prefix}.expect metric {unavailable[0]!r} must be selected by a measure operation"
+            )
+        fields["expect"] = expect
+
+
+def _analysis_positive_float(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"{name} must be a positive number")
+    return _positive_float(value, name)
+
+
+def _analysis_bounded_positive_float(value: Any, name: str, *, maximum: float) -> float:
+    result = _analysis_positive_float(value, name)
+    if result > maximum:
+        raise ConfigError(f"{name} must be <= {maximum:g}")
+    return result
+
+
+def _normalize_analysis_filter_cutoff(
+    raw: Any,
+    *,
+    response: str,
+    name: str,
+) -> float | list[float]:
+    if response in {"lowpass", "highpass"}:
+        return _analysis_positive_float(raw, name)
+    if not isinstance(raw, list) or len(raw) != 2:
+        raise ConfigError(f"{name} must be a two-element array for {response}")
+    cutoff = [_analysis_positive_float(value, name) for value in raw]
+    if cutoff[1] <= cutoff[0]:
+        raise ConfigError(f"{name} must be strictly increasing")
+    return cutoff
+
+
+def _validate_analysis_filter_fields(
+    raw: dict[str, Any],
+    *,
+    allowed: set[str],
+    required: set[str],
+    prefix: str,
+) -> None:
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        names = ", ".join(repr(name) for name in unknown)
+        raise ConfigError(f"{prefix} filter has unknown field {names}")
+    missing = sorted(required - set(raw))
+    if missing:
+        names = ", ".join(repr(name) for name in missing)
+        raise ConfigError(f"{prefix} filter missing required field {names}")
 
 
 def _normalize_frequency_response_fields(prefix: str, fields: dict[str, Any]) -> None:

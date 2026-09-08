@@ -238,7 +238,13 @@ def _load_run_service(args: argparse.Namespace) -> RunService:
     config = load_config(args.config)
     if args.resource:
         config = config.with_resource(args.resource)
-    return RunService(config=config, logger=CommandLogger())
+    from .data.analysis_resources import load_resource_limits
+
+    from .services.analysis_execution import load_analysis_execution
+    execution = load_analysis_execution(getattr(args, "analysis_execution", None))
+    profile = getattr(args, "analysis_resources", None)
+    return RunService(config=config, logger=CommandLogger(),
+                      analysis_limits=load_resource_limits(profile) if profile else None, analysis_execution=execution)
 
 
 def _load_sweep_service(args: argparse.Namespace) -> SweepService:
@@ -808,6 +814,7 @@ def _run_plan_payload(plan) -> dict[str, object]:
                 "index": step.index,
                 "kind": step.kind,
                 "fields": _json_payload(step.fields),
+                **({"id": step.id} if step.id is not None else {}),
             }
             for step in plan.steps
         ],
@@ -1075,6 +1082,39 @@ def _main(argv: list[str] | None = None) -> int:
                 refresh_interval_s=args.refresh_interval,
                 log_path=args.log_file,
             )
+        if args.domain == "analysis":
+            from .data.analysis_resources import load_resource_limits
+
+            limits = load_resource_limits(args.analysis_resources)
+            if args.command in {"pair-check", "pair-run"}:
+                from .services.pair_service import pair_check, pair_run
+                from .services.analysis_execution import load_analysis_execution
+                options = dict(capture=args.capture, recipe=args.recipe, resource_limits=limits,
+                               execution_policy=load_analysis_execution(args.analysis_execution))
+                result = pair_run(**options, output=args.output) if args.command == "pair-run" else pair_check(**options)
+                print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
+                return 0 if result["status"] == "ok" else 1
+            if args.command == "batch":
+                from .services.analysis_batch import run_batch
+                from .services.analysis_execution import load_analysis_execution
+                result = run_batch(args.manifest, args.output, resume=args.resume, resource_limits=limits,
+                                   execution_policy=load_analysis_execution(args.analysis_execution))
+                print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
+                return 0 if result["status"] == "ok" else 1
+            if args.command == "report":
+                from .report.analysis import write_analysis_report
+
+                print(write_analysis_report([Path(path) for path in args.paths], Path(args.output), resource_limits=limits))
+                return 0
+            from .services.analysis_service import check_analysis, run_analysis
+
+            from .services.analysis_execution import load_analysis_execution
+            options = dict(capture=Path(args.capture), channel=args.channel, recipe=Path(args.recipe), resource_limits=limits,
+                           execution_policy=load_analysis_execution(args.analysis_execution))
+            result = (run_analysis(**options, output=Path(args.output))
+                      if args.command == "run" else check_analysis(**options))
+            print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
+            return 0 if result["status"] == "ok" else 1
         if args.domain == "capture":
             if args.command == "inspect":
                 package = load_capture_package(args.path)
@@ -1102,7 +1142,8 @@ def _main(argv: list[str] | None = None) -> int:
                 plan = load_run_plan(args.plan)
                 service = _load_run_service(args)
                 service.check(plan)
-                intent = build_execution_intent(plan, service.config)
+                intent = build_execution_intent(plan, service.config, resource_limits=getattr(service, "analysis_limits", None),
+                                                execution_policy=getattr(service, "analysis_execution", None))
                 if args.output:
                     output = write_execution_intent(intent, args.output)
                     if not args.json:
@@ -1214,7 +1255,13 @@ def _main(argv: list[str] | None = None) -> int:
                     raise ConfigError(
                         "run report --pdf-output is a PDF path and must not use an HTML suffix"
                     )
-                output = write_run_report_html(package, output_path=output)
+                if args.analysis_resources:
+                    from .data.analysis_resources import load_resource_limits
+
+                    output = write_run_report_html(package, output_path=output,
+                                                   analysis_limits=load_resource_limits(args.analysis_resources))
+                else:
+                    output = write_run_report_html(package, output_path=output)
                 print(f"report={output}")
                 if args.pdf:
                     pdf = write_run_report_pdf(package, output_path=pdf_output)
@@ -2207,6 +2254,8 @@ def _main(argv: list[str] | None = None) -> int:
                 channels = args.channel or [service.config.scope.default_channel]
                 for channel in channels:
                     service.require_high_impedance(channel, allow_50ohm=args.allow_50ohm)
+                if args.synchronized and len(channels) != 2:
+                    raise ConfigError("synchronized capture requires two channels")
                 if len(channels) == 1:
                     result = service.capture_waveform(channel=channels[0], label=args.label)
                     _print_waveform_summary(result.waveform)
@@ -2220,7 +2269,8 @@ def _main(argv: list[str] | None = None) -> int:
                     if result.commands_log_path is not None:
                         print(f"commands_log={result.commands_log_path}")
                     return 0
-                result = service.capture_waveforms(channels=channels, label=args.label)
+                result = service.capture_waveforms(channels=channels, label=args.label,
+                                                  **({"synchronized": True} if args.synchronized else {}))
                 for channel in channels:
                     _print_waveform_summary(result.waveforms[channel])
                     files = result.files.get(str(channel), {})

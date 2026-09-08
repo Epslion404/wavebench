@@ -24,6 +24,128 @@ from wavebench.report.html import (
 
 
 class RunReportTests(unittest.TestCase):
+    def test_run_report_has_independent_signal_processing_section_and_manifest_entries(self):
+        with TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            processing = run_dir / "processing" / "01_spectrum_main"
+            exports = processing / "exports"
+            exports.mkdir(parents=True)
+            (processing / "manifest.json").write_text("{}", encoding="utf-8")
+            (processing / "metrics.json").write_text("{}", encoding="utf-8")
+            (exports / "spectrum.csv").write_text(
+                "frequency_hz,real_v,imaginary_v,amplitude_v\n",
+                encoding="utf-8",
+            )
+            (run_dir / "run.json").write_text(
+                json.dumps({
+                    "status": "failed",
+                    "steps": [
+                        {
+                            "index": 1,
+                            "id": "spectrum_main",
+                            "kind": "analysis.pipeline",
+                            "status": "failed",
+                            "artifact": {
+                                "metrics": {
+                                    "peak_frequency_hz": 1000.0,
+                                    "thd_ratio": None,
+                                },
+                                "analysis_pipeline": {
+                                    "schema": "wavebench.analysis_pipeline.v1",
+                                    "status": "failed",
+                                    "source_step": "capture_main",
+                                    "operations": [
+                                        {"op": "remove_dc"},
+                                        {
+                                            "op": "filter",
+                                            "family": "fir",
+                                            "response": "bandstop",
+                                            "cutoff_hz": [49.0, 51.0],
+                                            "numtaps": 101,
+                                            "mode": "zero_phase",
+                                        },
+                                        {
+                                            "op": "filter",
+                                            "family": "iir",
+                                            "design": "elliptic",
+                                            "response": "bandstop",
+                                            "cutoff_hz": [49.0, 51.0],
+                                            "order": 6,
+                                            "ripple_db": 1.0,
+                                            "attenuation_db": 60.0,
+                                            "mode": "zero_phase",
+                                        },
+                                        {"op": "fft"},
+                                        {"op": "measure", "metrics": ["peak_frequency_hz"]},
+                                    ],
+                                    "manifest": "processing/01_spectrum_main/manifest.json",
+                                    "metrics": "processing/01_spectrum_main/metrics.json",
+                                    "warnings": ["harmonic_5_out_of_band"],
+                                    "failed_stage": "operations[3]",
+                                    "exports": [
+                                        {
+                                            "name": "spectrum",
+                                            "format": "csv",
+                                            "path": "processing/01_spectrum_main/exports/spectrum.csv",
+                                            "sha256": "abc",
+                                        }
+                                    ],
+                                },
+                            },
+                        }
+                    ],
+                }),
+                encoding="utf-8",
+            )
+
+            output = write_run_report_html(load_run_package(run_dir))
+
+            html = output.read_text(encoding="utf-8")
+            self.assertIn("<h2>信号处理 / Signal processing</h2>", html)
+            self.assertIn("spectrum_main", html)
+            self.assertIn("capture_main", html)
+            self.assertIn(
+                "remove_dc → filter(fir, bandstop, 49–51 Hz, 101 taps, zero_phase) "
+                "→ filter(iir, bandstop, 49–51 Hz, elliptic, order 6, zero_phase) "
+                "→ fft → measure",
+                html,
+            )
+            self.assertIn("peak_frequency_hz=1000", html)
+            self.assertIn("thd_ratio=null", html)
+            self.assertIn("harmonic_5_out_of_band", html)
+            self.assertIn("operations[3]", html)
+            self.assertIn('href="processing/01_spectrum_main/exports/spectrum.csv"', html)
+            manifest = json.loads(
+                (run_dir / "report-assets" / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(manifest["analysis_pipelines"]), 1)
+            analysis = manifest["analysis_pipelines"][0]
+            self.assertEqual(analysis["step_id"], "spectrum_main")
+            self.assertEqual(analysis["manifest"], "processing/01_spectrum_main/manifest.json")
+            self.assertTrue(analysis["manifest_exists"])
+            self.assertEqual(
+                analysis["exports"][0]["path"],
+                "processing/01_spectrum_main/exports/spectrum.csv",
+            )
+            self.assertTrue(analysis["exports"][0]["exists"])
+
+    def test_report_manifest_omits_analysis_list_for_legacy_run(self):
+        with TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            (run_dir / "run.json").write_text(
+                json.dumps({"status": "ok", "steps": []}), encoding="utf-8"
+            )
+
+            output = write_run_report_html(load_run_package(run_dir))
+
+            html = output.read_text(encoding="utf-8")
+            self.assertNotIn("<h2>信号处理 / Signal processing</h2>", html)
+            manifest = json.loads(
+                (run_dir / "report-assets" / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertNotIn("analysis_pipelines", manifest)
+
     def test_response_svg_uses_a_separate_two_column_legend_area(self):
         svg = _response_svg(
             [[(100.0, 1.0), (1000.0, 2.0)]],

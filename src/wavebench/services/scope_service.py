@@ -1547,20 +1547,25 @@ class ScopeService(SessionStateAliasMixin):
             commands_log_path=commands_log_path,
         )
 
-    def capture_waveforms(self, channels: list[int], label: str) -> MultiCaptureResult:
+    def capture_waveforms(self, channels: list[int], label: str, *, synchronized: bool = False) -> MultiCaptureResult:
         if not channels:
             raise ConfigError("at least one channel is required")
         if len(set(channels)) != len(channels):
             raise ConfigError("duplicate channels are not allowed")
         bounded_profile = self._waveform_binary_profile()
-        required = ["scope.idn", "scope.capture_waveforms"]
+        synchronization = None
+        if synchronized and (sorted(channels) != [1, 2] or self.config.waveform.points.upper() != "DEF"):
+            raise ConfigError("synchronized capture currently requires channels 1,2 and DEF points")
+        required = ["scope.idn", "scope.capture_synchronized" if synchronized else "scope.capture_waveforms"]
         if bounded_profile is not None and self.config.scope.check_errors:
             required.append("scope.error_drain_v1")
         elif self.config.scope.check_errors:
             required.append("scope.errors")
         if self.config.output.save_screenshot:
             required.append(self._legacy_capture_screenshot_capability())
-        self._require("scope.capture_multiple", *required)
+        self._require("scope.capture_synchronized" if synchronized else "scope.capture_multiple", *required)
+        if synchronized and (not self.config.output.save_npy or not self.config.output.save_json):
+            raise ConfigError("synchronized capture requires NPY and JSON outputs")
         package_dir = new_package_dir(self.config.output.directory, label)
         package_dir.mkdir(parents=True, exist_ok=False)
         commands_log_path = package_dir / "commands.log" if self.config.output.save_commands_log else None
@@ -1617,7 +1622,25 @@ class ScopeService(SessionStateAliasMixin):
 
                     stage = "acquire"
                     failed_channel = None
-                    if bounded_profile is not None:
+                    if synchronized:
+                        from wavebench.instruments.synchronized_capture import SynchronizedCapture
+                        evidence = self._session_preflight("scope.capture_synchronized", scope)
+                        instrument_idn = evidence.get("scope.identity") or scope.idn()
+                        result = scope.capture_synchronized(channels=channels, points=self.config.waveform.points,
+                            check_errors=self.config.scope.check_errors, time_range_s=self.config.waveform.time_range_s,
+                            vertical_scale_v_per_div=self.config.waveform.vertical_scale_v_per_div, on_waveform=save_waveform)
+                        if not isinstance(result, SynchronizedCapture):
+                            raise DataError("driver returned invalid synchronized capture")
+                        from wavebench.data.pair_analysis import validate_sync
+                        from wavebench.data.signal_pipeline import TimeSignal
+                        if set(result.waveforms) != set(channels):
+                            raise DataError("synchronized capture returned incomplete channels")
+                        left, right = (result.waveforms[ch] for ch in sorted(channels))
+                        validate_sync(TimeSignal(left.times_s, left.voltages_v), TimeSignal(right.times_s, right.voltages_v),
+                                      result.synchronization, sorted(channels))
+                        synchronization = result.synchronization
+                        returned_waveforms = result.waveforms
+                    elif bounded_profile is not None:
                         result = self._bounded_waveform_executor(scope).capture_multiple(
                             channels=channels,
                             points=self.config.waveform.points,
@@ -1695,6 +1718,8 @@ class ScopeService(SessionStateAliasMixin):
             "channels": channel_metadata,
             "files": metadata_files,
         }
+        if synchronization is not None:
+            metadata["synchronization"] = synchronization
         if screenshot_error is not None:
             metadata["screenshot_error"] = screenshot_error
         metadata_path = package_dir / "metadata.json"

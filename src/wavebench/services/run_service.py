@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
 from wavebench.config import WaveBenchConfig
+from wavebench.data.analysis_resources import AnalysisLimits
 from wavebench.data.package import new_package_dir, safe_label
 from wavebench.data.packages import load_run_package
 from wavebench.errors import (
@@ -121,6 +122,10 @@ from wavebench.services.run_analysis import (
     step_status,
 )
 from wavebench.services.run_plan import RunPlan, RunStep
+from wavebench.services.run_pipeline import (
+    ensure_analysis_pipeline_dependencies,
+    execute_analysis_pipeline,
+)
 from wavebench.services.run_restore import restore_source_state, snapshot_source_state
 from wavebench.services.run_safety import (
     check_run_plan_safety_limits,
@@ -244,6 +249,9 @@ class RunService:
     config: WaveBenchConfig
     logger: CommandLogger
     lease_manager: ResourceLeaseManager | None = None
+    analysis_limits: AnalysisLimits | None = None
+    analysis_execution: Any = None
+    analysis_cancel_event: Any = None
 
     def verify(self, plan: RunPlan) -> list[RunPreflightRecord]:
         self.check(plan)
@@ -305,12 +313,38 @@ class RunService:
         return records
 
     def check(self, plan: RunPlan) -> None:
+        if self.analysis_execution is not None:
+            self.analysis_execution.preflight()
+        from wavebench.data.analysis_resources import AnalysisLimits, check_static
+
+        for step in plan.steps:
+            if step.kind == "analysis.pipeline":
+                limits = (self.analysis_limits or AnalysisLimits()).tighten(step.fields.get("resources"))
+                check_static(step.fields["operations"], limits)
+            elif step.kind == "analysis.pair":
+                from .pair_service import ensure_pair_dependencies
+                from wavebench.data.pair_analysis import check_pair_static
+                limits = (self.analysis_limits or AnalysisLimits()).tighten(step.fields.get("resources"))
+                check_pair_static(step.fields["operations"], limits)
+                ensure_pair_dependencies()
         check_run_plan_safety_limits(plan, self.config.safety_limits)
         reject_unsupported_steps(plan)
+        ensure_analysis_pipeline_dependencies(plan)
         self._check_frequency_response_baselines(plan)
         self._check_frequency_response_resumes(plan)
         self._check_rf_source_access(plan)
         self._check_plan_capabilities(plan)
+        self._source_restore_coverage(plan)
+
+    def _source_restore_coverage(self, plan):
+        from .run_restore import source_restore_coverage
+        if not plan.restore.source_state and not any(s.kind.startswith("source.") for s in plan.steps):
+            return None
+        cfg = self.config.source
+        if cfg is None:
+            return None
+        descriptor = resolve_instrument_descriptor(cfg.driver, expected_kind="source")
+        return source_restore_coverage(plan, descriptor, cfg.default_channel)
 
     def _check_rf_source_access(self, plan: RunPlan) -> None:
         """Reject RF operations by access policy before run lifecycle opens a session."""
@@ -445,6 +479,10 @@ class RunService:
                 source.driver,
                 expected_kind="source",
             )
+            if getattr(descriptor, "source_restore", None) is not None:
+                if descriptor.source_restore.supported:
+                    add("source", "source.restore_state", "source.idn")
+                return
             v2_restore = {
                 "source.snapshot_v2",
                 "source.basic_configure_v2",
@@ -469,7 +507,7 @@ class RunService:
                 if self.config.autoscale.check_errors:
                     add("scope", "scope.errors")
             elif step.kind == "scope.capture":
-                add("scope", "scope.idn", "scope.capture_waveform")
+                add("scope", "scope.idn", "scope.capture_synchronized" if step.fields.get('synchronized') else "scope.capture_waveform")
                 if self.config.scope.check_errors:
                     add("scope", "scope.errors")
                 if step.fields.get("screenshot", self.config.output.save_screenshot):
@@ -672,6 +710,7 @@ class RunService:
     def _plan_instruments(self, plan: RunPlan) -> set[str]:
         instruments = {step.kind.split(".", 1)[0] for step in plan.steps if "." in step.kind}
         instruments.discard("sleep")
+        instruments.discard("analysis")
         if "sweep" in instruments:
             instruments.discard("sweep")
             instruments.update({"source", "scope"})
@@ -702,10 +741,12 @@ class RunService:
         execution_intent: Mapping[str, Any] | None = None,
     ) -> RunResult:
         self.check(plan)
-        intent = build_execution_intent(plan, self.config)
+        intent = build_execution_intent(plan, self.config, resource_limits=self.analysis_limits, execution_policy=self.analysis_execution)
         if execution_intent is not None:
-            intent = verify_execution_intent(execution_intent, plan, self.config)
+            intent = verify_execution_intent(execution_intent, plan, self.config, resource_limits=self.analysis_limits, execution_policy=self.analysis_execution)
         plan_hash = intent.plan_digest
+        analysis_steps = [step for step in plan.steps if step.kind in {"analysis.pipeline", "analysis.pair"}]
+        hardware_steps = plan.steps[: len(plan.steps) - len(analysis_steps)]
         with self._run_instrument_lifecycle(plan) as services:
             self._run_safety_guards(plan, services=services)
             run_dir = new_package_dir(run_output_base(self.config), plan.label)
@@ -734,6 +775,10 @@ class RunService:
                     "capture_sync_grade": CAPTURE_SYNC_GRADE,
                 },
             }
+
+            coverage = self._source_restore_coverage(plan)
+            if coverage is not None:
+                provenance["source_restore_coverage"] = coverage
 
             def append_source_operation_artifact(value: object) -> None:
                 if isinstance(value, dict):
@@ -791,7 +836,7 @@ class RunService:
                     plan,
                     source_service_factory=lambda: self._source_service(services=services),
                 )
-                for step in plan.steps:
+                for step in hardware_steps:
                     step_failure: BaseException | None = None
                     try:
                         record = self._run_step(
@@ -819,6 +864,7 @@ class RunService:
                             kind=step.kind,
                             status="failed",
                             fields=step.fields,
+                            id=step.id,
                             artifact={
                                 "error": error_envelope(
                                     exc,
@@ -835,6 +881,7 @@ class RunService:
                             kind=step.kind,
                             status="failed",
                             fields=step.fields,
+                            id=step.id,
                             artifact={
                                 "error": error_envelope(
                                     exc,
@@ -878,6 +925,8 @@ class RunService:
                             status="failed",
                             artifact={**record.artifact, "safety_gate": gate_result},
                         )
+                    if step.kind == "source.arb_load" and coverage is not None:
+                        record = replace(record, artifact={**record.artifact, "restore_coverage": coverage})
                     records.append(record)
                     write_step_record(steps_dir, record)
                     self._update_frequency_responses_manifest(run_dir, record)
@@ -1004,6 +1053,7 @@ class RunService:
 
             restore_error = restore_source_state(
                 restore_state,
+                force_off_channels=tuple((safety_gate_config or {}).get("source_channels", ())),
                 source_service_factory=lambda: self._source_service(services=services),
             )
             if (
@@ -1078,7 +1128,117 @@ class RunService:
                 steps=records,
             )
 
-        return result
+        if not analysis_steps or run_failure is not None or services.close_errors:
+            return result
+
+        source_steps = {
+            step.id: step
+            for step in hardware_steps
+            if step.kind == "scope.capture" and step.id is not None
+        }
+        source_records = {record.index: record for record in records}
+        analysis_failure: dict[str, Any] | None = None
+        try:
+            for step in analysis_steps:
+                source_step = source_steps[step.fields["source"]["step"]]
+                source_record = source_records.get(source_step.index)
+                try:
+                    executor = execute_analysis_pipeline
+                    if step.kind == "analysis.pair":
+                        from .pair_service import execute_pair_step
+                        executor = execute_pair_step
+                    artifact = executor(
+                        run_dir=run_dir,
+                        step=step,
+                        source_step=source_step,
+                        source_record=source_record,
+                        resource_limits=self.analysis_limits,
+                        execution_policy=self.analysis_execution, cancel_event=self.analysis_cancel_event,
+                    )
+                except Exception as exc:  # noqa: BLE001 - preserve offline step failure
+                    payload = error_envelope(
+                        exc,
+                        operation=f"run.step.{step.kind}",
+                    )
+                    artifact = {
+                        "analysis_pipeline": {
+                            "schema": "wavebench.analysis_pipeline.v1",
+                            "status": "failed",
+                            "source_step": source_step.id,
+                            "operations": step.fields["operations"],
+                            "warnings": [],
+                            "exports": [],
+                            "failed_stage": "setup",
+                            "error": payload,
+                        },
+                        "metrics": {},
+                    }
+                    if "expect" in step.fields:
+                        artifact["expect"] = evaluate_expect({}, step.fields["expect"])
+                record = RunStepRecord(
+                    index=step.index,
+                    kind=step.kind,
+                    status=step_status(artifact),
+                    fields=step.fields,
+                    artifact=artifact,
+                    id=step.id,
+                )
+                records.append(record)
+                write_step_record(steps_dir, record)
+                cancelled = artifact.get("analysis_pipeline", {}).get("error", {}).get("code") == "analysis_cancelled"
+                if record.status == "failed" and (cancelled or step.fields.get("on_failure", "stop") == "stop"):
+                    analysis_failure = {
+                        "type": "StepFailure",
+                        "code": "step_failed",
+                        "message": f"run step {step.index} ({step.kind}) failed",
+                        "step_index": step.index,
+                        "step_kind": step.kind,
+                        "policy": "stop",
+                    }
+                    pipeline_error = artifact.get("analysis_pipeline", {}).get("error")
+                    if isinstance(pipeline_error, dict):
+                        analysis_failure["error"] = pipeline_error
+                    break
+        except KeyboardInterrupt as exc:
+            interruption_error = {
+                "type": "KeyboardInterrupt",
+                "message": str(exc) or "run interrupted by user",
+            }
+            write_run_files(
+                plan=plan,
+                run_json_path=run_json_path,
+                summary_csv_path=summary_csv_path,
+                status="failed",
+                records=records,
+                error=interruption_error,
+                restore_state=restore_state,
+                restore_error=None,
+                provenance=provenance,
+                source_operations=source_operations,
+                rf_source_operations=rf_source_operations,
+            )
+            raise
+
+        run_status = "failed" if any(record.status == "failed" for record in records) else "ok"
+        write_run_files(
+            plan=plan,
+            run_json_path=run_json_path,
+            summary_csv_path=summary_csv_path,
+            status=run_status,
+            records=records,
+            error=analysis_failure,
+            restore_state=restore_state,
+            restore_error=None,
+            provenance=provenance,
+            source_operations=source_operations,
+            rf_source_operations=rf_source_operations,
+        )
+        return RunResult(
+            run_dir=run_dir,
+            run_json_path=run_json_path,
+            summary_csv_path=summary_csv_path,
+            steps=records,
+        )
 
     @contextmanager
     def _run_instrument_lifecycle(
@@ -1827,6 +1987,7 @@ class RunService:
             status=step_status(artifact),
             fields=step.fields,
             artifact=artifact,
+            id=step.id,
         )
 
     def _run_frequency_response_step(
@@ -2543,6 +2704,7 @@ class RunService:
             status="failed",
             fields=step.fields,
             artifact=artifact,
+            id=step.id,
         )
         return _FrequencyResponseExecutionError(record, cause)
 
@@ -2734,6 +2896,10 @@ class RunService:
         service = self._scope_service_for_capture(plan, step, services=services)
         channel = step.fields.get("channel", self.config.scope.default_channel)
         label = step.fields.get("label", f"{plan.label}_{step.index:02d}_capture")
+        if step.fields.get('synchronized'):
+            capture = service.capture_waveforms(channels=step.fields['channels'], label=label, synchronized=True)
+            return {'package': str(capture.package_dir), 'metadata': str(capture.metadata_path),
+                    'synchronization': {'status': 'verified'}, 'channels': step.fields['channels']}
         autoscale_before_capture = step.fields.get("autoscale_before_capture", False)
         autoscale_settle_s = step.fields.get("autoscale_settle_s", 0.0)
         autoscale_record: dict[str, Any] | None = None
@@ -2760,6 +2926,7 @@ class RunService:
                 retry = service.capture_waveform(
                     channel=channel, label=f"{label}_auto_retry{attempt}"
                 )
+                capture = retry
                 artifact = self._capture_artifact(retry, service)
                 artifacts.append(artifact)
                 attempts.append(self._recovery_attempt_record(attempt, "auto_retry", artifact))

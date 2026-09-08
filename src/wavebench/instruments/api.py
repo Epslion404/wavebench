@@ -11,6 +11,7 @@ from wavebench.transport.base import InstrumentTransport
 
 from .scope_extensions import ScopeDescriptorExtensions
 from .source_extensions import SourceDescriptorExtensions
+from .source_restore import SourceRestoreProfile
 from .rf_source_extensions import RfSourceDescriptorExtensions
 
 EXECUTABLE_PLUGIN_API_VERSION = "wavebench.instrument.v2"
@@ -94,6 +95,7 @@ class InstrumentDescriptor:
     scope_extensions: ScopeDescriptorExtensions | None = None
     source_extensions: SourceDescriptorExtensions | None = None
     rf_source_extensions: RfSourceDescriptorExtensions | None = None
+    source_restore: SourceRestoreProfile | None = None
 
     def __post_init__(self) -> None:
         if not self.driver_id or self.driver_id.strip() != self.driver_id:
@@ -131,6 +133,15 @@ class InstrumentDescriptor:
                 raise ValueError("source_extensions can only be declared by source descriptors")
             if not isinstance(self.source_extensions, SourceDescriptorExtensions):
                 raise TypeError("source_extensions has an invalid type")
+        if self.source_restore is not None:
+            if self.kind != "source" or not isinstance(self.source_restore, SourceRestoreProfile):
+                raise ValueError("source_restore requires a source descriptor and SourceRestoreProfile")
+            if set(self.source_restore.operations) - set(self.capabilities):
+                raise ValueError("restore operations must be declared capabilities")
+            if self.source_restore.supported != ("source.restore_state" in self.capabilities):
+                raise ValueError("source_restore support must match source.restore_state capability")
+        elif "source.restore_state" in self.capabilities:
+            raise ValueError("source.restore_state requires a source_restore profile")
         if self.rf_source_extensions is None:
             if self.kind == "rf_source":
                 raise ValueError("rf_source descriptors require rf_source_extensions")

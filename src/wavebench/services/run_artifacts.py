@@ -20,15 +20,19 @@ class RunStepRecord:
     status: str
     fields: dict[str, Any]
     artifact: dict[str, Any]
+    id: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "index": self.index,
             "kind": self.kind,
             "status": self.status,
             "fields": self.fields,
             "artifact": self.artifact,
         }
+        if self.id is not None:
+            result["id"] = self.id
+        return result
 
 
 def write_step_record(steps_dir: Path, record: RunStepRecord) -> None:
@@ -100,6 +104,9 @@ def write_run_files(
             "snapshots": snapshots,
             "status": "failed" if restore_error is not None else "ok",
         }
+        results = [state.restore_evidence for state in restore_state if getattr(state, "restore_evidence", None) is not None]
+        if results:
+            run_data["restore"]["results"] = results
         if len(restore_state) == 1:
             run_data["restore"]["source_channel"] = restore_state[0].channel
             run_data["restore"]["snapshot"] = restore_state[0].as_dict()

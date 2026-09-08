@@ -3,6 +3,7 @@ from __future__ import annotations
 from wavebench import __version__
 
 from .api import InstrumentDescriptor
+from .source_restore import SourceRestoreProfile
 
 
 def _open_rtm2032(context):
@@ -122,6 +123,7 @@ BUILTIN_INSTRUMENTS: tuple[InstrumentDescriptor, ...] = (
             "source.output",
             "source.arbitrary_probe",
             "source.arbitrary_upload",
+            "source.restore_state",
         ),
         idn_patterns=("RIGOL TECHNOLOGIES,DG4",),
         backends=("pyvisa",),
@@ -131,6 +133,14 @@ BUILTIN_INSTRUMENTS: tuple[InstrumentDescriptor, ...] = (
         summary="RIGOL DG4000-series signal source driver for frequency, waveform, output, and ARB flows.",
         version=__version__,
         config_fields=("source.resource", "source.driver", "safety_limits.max_source_vpp"),
+        source_restore=SourceRestoreProfile(
+            supported=True,
+            operations=("source.set_frequency", "source.set_function", "source.set_amplitude_vpp",
+                        "source.set_square_duty_cycle", "source.output", "source.arbitrary_upload"),
+            fields=("output", "function", "frequency_hz", "amplitude", "amplitude_unit",
+                    "square_duty_cycle_percent", "offset_v", "frequency_mode", "sweep_enabled"),
+            excluded_fields=("arbitrary_payload", "phase_deg", "load", "burst", "modulation"),
+        ),
     ),
     InstrumentDescriptor(
         driver_id="rigol.dp800",

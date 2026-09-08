@@ -45,6 +45,7 @@ nav:
       - 从模板到报告: tutorials/from-template-to-report.md
   - How-to:
       - 执行一次实验: how-to/run-an-experiment.md
+      - 使用信号处理流水线: how-to/signal-processing.md
       - 频率响应与校准: how-to/frequency-response-and-calibration.md
       - 使用 RF 信号源: how-to/use-rf-source.md
       - 管理仪器插件: how-to/manage-plugins.md

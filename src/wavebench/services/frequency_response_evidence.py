@@ -40,7 +40,10 @@ def plan_digest(plan: Any) -> str:
         # the requested measurement grid or signal semantics.  Excluding it lets
         # a resumed plan reuse points produced by its original plan.
         fields.pop("resume_from", None)
-        steps.append({"index": step.index, "kind": step.kind, "fields": fields})
+        payload = {"index": step.index, "kind": step.kind, "fields": fields}
+        if getattr(step, "id", None) is not None:
+            payload["id"] = step.id
+        steps.append(payload)
     return digest(
         {
             "name": getattr(plan, "name", ""),

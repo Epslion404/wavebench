@@ -29,6 +29,7 @@
 
 ## 分析与报告
 
+- [使用信号处理流水线](how-to/signal-processing.md)：处理采集包、声明 RunPlan 分析链，以及生成批量和双通道分析报告。
 - [运行产物 Reference](reference/artifacts.md)：`run.json`、`summary.csv` 和 step 记录的稳定入口。
 - [频率响应与校准](how-to/frequency-response-and-calibration.md)：从模板、离线检查到报告的专题操作入口。
 

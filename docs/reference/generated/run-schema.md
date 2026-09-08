@@ -12,8 +12,17 @@ Top-level tables:
   [safety] optional: scope_guard_channel, require_scope_coupling_not, allow_50ohm, safety_gate, off_source_channels, off_power_channels
   [restore] optional: source_state, source_channel, source_channels
   [[steps]] required: kind
+  [[steps]] optional structural field: id matching ^[a-z][a-z0-9_-]{0,63}$
 
 Supported step kinds:
+  - analysis.pair
+      required: source, reference_channel, response_channel, operations
+      optional : expect, on_failure, resources
+      note     : Analyze two evidence-validated channels from one earlier capture package after hardware cleanup. Accepts synthetic or driver-owned frozen-single synchronization evidence.
+  - analysis.pipeline
+      required: source, operations
+      optional : expect, on_failure, resources
+      note     : Process one earlier scope.capture NPY after all hardware sessions close. Uses a validated linear operator list, checks optional dependencies on demand, and never opens an instrument.
   - dmm.read
       required: -
       optional : expect, function, on_failure, safety_gate
@@ -86,7 +95,7 @@ Supported step kinds:
       note     : Explicit RTM2032 AUToscale. It changes front-panel settings and is never inserted implicitly.
   - scope.capture
       required: -
-      optional : auto_recover, autoscale_before_capture, autoscale_settle_s, channel, expect, expect_fft, expect_frequency_hz, frequency_tolerance, label, on_failure, points, quality_gate, safety_gate, save_csv, save_npy, screenshot, target_cycles, target_vpp, time_range_s, vertical_scale_v_per_div, window_frequency_hz
+      optional : auto_recover, autoscale_before_capture, autoscale_settle_s, channel, channels, expect, expect_fft, expect_frequency_hz, frequency_tolerance, label, on_failure, points, quality_gate, safety_gate, save_csv, save_npy, screenshot, synchronized, target_cycles, target_vpp, time_range_s, vertical_scale_v_per_div, window_frequency_hz
       note     : Trigger one acquisition, write a capture package, and optionally evaluate quality/expect checks. Use target_vpp or vertical_scale_v_per_div to fit the waveform vertically before capture.
   - sleep
       required: duration_s
@@ -237,4 +246,28 @@ Supported step kinds:
 scope.capture [steps.expect_fft] metrics:
   FFT checks analyze the saved NPY waveform.
   Common metrics: peak_frequency_hz, peak_amplitude_v, thd_ratio, harmonic_2_amplitude_v.
+
+analysis.pipeline metrics:
+  Optional [steps.resources] tightens the execution resource profile; --analysis-resources selects an explicit environment TOML profile.
+  Default resource admission bounds FIR taps, FFT length, working-set estimate, cumulative work/output and file counts before allocation. Actual source length is checked offline after capture.
+  Time domain: voltage_min_v, voltage_max_v, voltage_mean_v, voltage_rms_v, voltage_vpp_v.
+  Frequency domain: peak_frequency_hz, peak_amplitude_v, noise_floor_v, thd_ratio, and harmonic_2 through harmonic_5 frequency/amplitude fields.
+  PSD domain: measure_band requires name, band_hz, exclude_hz and metrics=mean_square_v2|rms_v|noise_rms_v. Metric keys are <name>_<metric>.
+
+  scope.capture synchronized=true requires channels=[1,2], save_npy=true and DEF points; single-channel quality/auto-retry fields are not accepted. Requires scope.capture_synchronized capability.
+analysis.pair: reference_channel and response_channel must be distinct; source uses one earlier scope.capture with explicit save_npy=true.
+  Pair operations: delay (integer lag), transfer (mean Welch H1/coherence), export. Synthetic and driver_frozen_single evidence are accepted.
+  spectral_quality requires explicit integration bands, fundamental mode, harmonic orders, detection thresholds and metrics; only mean Welch PSD is accepted.
+  Quality metrics: snr_db, sinad_db, sfdr_db, thdn_ratio, fundamental_frequency_hz, fundamental_power_v2, harmonic_power_v2, noise_power_v2, noise_bandwidth_hz, spur_frequency_hz, spur_power_v2, spur_dbc.
+analysis.pipeline PSD operation:
+  psd requires method=welch, window=hann|hamming|blackman, nperseg>=4, 0<=noverlap<nperseg, nfft>=nperseg, detrend=none|constant|linear, average=mean|median.
+  All parameters are explicit; lengths are integers. Segment windows are periodic.
+  Requires time data before window or fft. Only export, measure_band, spectral_quality or peaks may follow psd; at least one PSD result is required.
+  Requires optional SciPy. Exports frequency_hz,psd_v2_per_hz with one-sided density scaling.
+  peaks requires name, polarity=positive|negative|both, height>=0, prominence>=0, distance>0, width>=0, max_peaks=1..10000, metrics=[count].
+  Peak distance/width use seconds in time and Hz in spectra; spectral polarity must be positive. Produces <name>_count and JSON/CSV tables without changing signal domain.
+  smooth requires method=moving_average|savgol, odd window_length=3..1001, mode=centered|causal, boundary=reflect|edge. Causal requires edge.
+  savgol requires polyorder=0..min(5,window_length-1); moving_average rejects polyorder. Smooth requires uniform time data before window/fft/psd.
+  resample requires positive integer up/down (reduced factors <=10000), window=kaiser, beta=0..30, padtype=constant|line. Output is limited to 20000000 samples.
+  Resample requires uniform time data before window/fft/psd; preserves time origin, uses a pinned polyphase FIR design and updates downstream sampling metadata.
 ```

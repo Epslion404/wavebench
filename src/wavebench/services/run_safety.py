@@ -14,6 +14,8 @@ class ScopeSafetyService(Protocol):
 
 
 EXECUTABLE_STEP_KINDS = {
+    "analysis.pipeline",
+    "analysis.pair",
     "power.status",
     "power.set",
     "power.output",
@@ -136,9 +138,9 @@ def plan_scope_guard_channels(plan: RunPlan, default_channel: int) -> list[int]:
     channels: list[int] = []
     for step in plan.steps:
         if step.kind == "scope.capture":
-            channel = step.fields.get("channel") or default_channel
-            if channel not in channels:
-                channels.append(channel)
+            for channel in step.fields.get('channels', [step.fields.get("channel") or default_channel]):
+                if channel not in channels:
+                    channels.append(channel)
         elif step.kind == "sweep.frequency_response":
             for field in ("reference_channel", "response_channel"):
                 channel = step.fields[field]

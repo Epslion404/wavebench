@@ -376,7 +376,8 @@ safety_gate = true
         source = patch("wavebench.services.run_service.SourceService").start()
         try:
             source_instance = source.return_value
-            state = SimpleNamespace(channel=1, as_dict=lambda: {"channel": 1})
+            from wavebench.services.source_state import RestorableSourceState
+            state = RestorableSourceState(1, "ON", "SIN", 1000., 1., "VPP")
             source_instance.snapshot_restorable_state.return_value = state
             source_instance.restore_restorable_state.return_value = SimpleNamespace(output="ON")
             source_instance.set_output.return_value = SimpleNamespace(output="OFF")
@@ -391,6 +392,7 @@ safety_gate = true
                 result = service.run(plan)
 
             assert source_instance.restore_restorable_state.call_count == 1
+            assert source_instance.restore_restorable_state.call_args.args[0].output == "OFF"
             assert source_instance.set_output.call_count == 2
             run_data = json.loads(result.run_json_path.read_text(encoding="utf-8"))
             assert run_data["error"]["safety_gate"]["post_restore"]["status"] == "ok"

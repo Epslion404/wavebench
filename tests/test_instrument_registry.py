@@ -288,6 +288,7 @@ def test_migration_canonical_falls_back_to_builtin_when_external_is_absent():
 def test_invalid_migration_plugin_does_not_remove_builtin_from_load_all():
     descriptor = make_external_dg4202_descriptor(
         capabilities=("source.unknown",),
+        source_restore=None,
     )
     entry_point = FakeEntryPoint("rigol.dg4202", descriptor)
 
