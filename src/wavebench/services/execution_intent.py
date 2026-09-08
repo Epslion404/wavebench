@@ -42,13 +42,15 @@ class ExecutionIntent:
     safety: Mapping[str, Any]
     restore: Mapping[str, Any]
     intent_digest: str
+    analysis_resources: Mapping[str, Any] | None = None
 
     @property
     def schema(self) -> str:
-        return INTENT_SCHEMA
+        return "wavebench.execution_intent.v2" if self.analysis_resources is not None else INTENT_SCHEMA
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            **({"analysis_resources": dict(self.analysis_resources)} if self.analysis_resources is not None else {}),
             "schema": self.schema,
             "intent_digest": self.intent_digest,
             "plan_digest": self.plan_digest,
@@ -60,7 +62,7 @@ class ExecutionIntent:
         }
 
 
-def build_execution_intent(plan: RunPlan, config: WaveBenchConfig) -> ExecutionIntent:
+def build_execution_intent(plan: RunPlan, config: WaveBenchConfig, *, resource_limits=None) -> ExecutionIntent:
     plan_hash = plan_digest(plan)
     config_hash = digest(_config_semantics(config))
     payloads: list[dict[str, Any]] = []
@@ -113,6 +115,9 @@ def build_execution_intent(plan: RunPlan, config: WaveBenchConfig) -> ExecutionI
         "safety": safety,
         "restore": restore,
     }
+    resources = resource_limits.evidence() if resource_limits is not None else None
+    if resources is not None:
+        body["analysis_resources"] = resources
     return ExecutionIntent(
         plan_digest=plan_hash,
         config_digest=config_hash,
@@ -121,6 +126,7 @@ def build_execution_intent(plan: RunPlan, config: WaveBenchConfig) -> ExecutionI
         safety=safety,
         restore=restore,
         intent_digest=digest(body, length=32),
+        analysis_resources=resources,
     )
 
 
@@ -140,7 +146,7 @@ def load_execution_intent(path: str | Path) -> dict[str, Any]:
         payload = json.loads(intent_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ExecutionIntentError(f"failed to read execution intent: {intent_path}") from exc
-    if not isinstance(payload, dict) or payload.get("schema") != INTENT_SCHEMA:
+    if not isinstance(payload, dict) or payload.get("schema") not in {INTENT_SCHEMA, "wavebench.execution_intent.v2"}:
         raise ExecutionIntentError(
             f"execution intent must use schema {INTENT_SCHEMA}: {intent_path}"
         )
@@ -151,10 +157,12 @@ def verify_execution_intent(
     expected: Mapping[str, Any],
     plan: RunPlan,
     config: WaveBenchConfig,
+    *, resource_limits=None,
 ) -> ExecutionIntent:
-    current = build_execution_intent(plan, config)
+    current = build_execution_intent(plan, config, resource_limits=resource_limits)
     expected_digest = expected.get("intent_digest")
-    if expected_digest != current.intent_digest:
+    if (expected_digest != current.intent_digest or expected.get("schema") != current.schema
+            or expected.get("analysis_resources") != current.analysis_resources):
         raise ExecutionIntentError(
             "execution intent does not match the current plan, configuration, or payloads",
             expected_digest=str(expected_digest) if expected_digest is not None else None,

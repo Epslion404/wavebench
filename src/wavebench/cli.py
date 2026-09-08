@@ -238,7 +238,11 @@ def _load_run_service(args: argparse.Namespace) -> RunService:
     config = load_config(args.config)
     if args.resource:
         config = config.with_resource(args.resource)
-    return RunService(config=config, logger=CommandLogger())
+    from .data.analysis_resources import load_resource_limits
+
+    profile = getattr(args, "analysis_resources", None)
+    return RunService(config=config, logger=CommandLogger(),
+                      analysis_limits=load_resource_limits(profile) if profile else None)
 
 
 def _load_sweep_service(args: argparse.Namespace) -> SweepService:
@@ -1077,14 +1081,17 @@ def _main(argv: list[str] | None = None) -> int:
                 log_path=args.log_file,
             )
         if args.domain == "analysis":
+            from .data.analysis_resources import load_resource_limits
+
+            limits = load_resource_limits(args.analysis_resources)
             if args.command == "report":
                 from .report.analysis import write_analysis_report
 
-                print(write_analysis_report([Path(path) for path in args.paths], Path(args.output)))
+                print(write_analysis_report([Path(path) for path in args.paths], Path(args.output), resource_limits=limits))
                 return 0
             from .services.analysis_service import check_analysis, run_analysis
 
-            options = dict(capture=Path(args.capture), channel=args.channel, recipe=Path(args.recipe))
+            options = dict(capture=Path(args.capture), channel=args.channel, recipe=Path(args.recipe), resource_limits=limits)
             result = (run_analysis(**options, output=Path(args.output))
                       if args.command == "run" else check_analysis(**options))
             print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
@@ -1116,7 +1123,7 @@ def _main(argv: list[str] | None = None) -> int:
                 plan = load_run_plan(args.plan)
                 service = _load_run_service(args)
                 service.check(plan)
-                intent = build_execution_intent(plan, service.config)
+                intent = build_execution_intent(plan, service.config, resource_limits=getattr(service, "analysis_limits", None))
                 if args.output:
                     output = write_execution_intent(intent, args.output)
                     if not args.json:
@@ -1228,7 +1235,13 @@ def _main(argv: list[str] | None = None) -> int:
                     raise ConfigError(
                         "run report --pdf-output is a PDF path and must not use an HTML suffix"
                     )
-                output = write_run_report_html(package, output_path=output)
+                if args.analysis_resources:
+                    from .data.analysis_resources import load_resource_limits
+
+                    output = write_run_report_html(package, output_path=output,
+                                                   analysis_limits=load_resource_limits(args.analysis_resources))
+                else:
+                    output = write_run_report_html(package, output_path=output)
                 print(f"report={output}")
                 if args.pdf:
                     pdf = write_run_report_pdf(package, output_path=pdf_output)

@@ -22,7 +22,7 @@ from wavebench.report.plot3d import (
 from wavebench.report.path_utils import artifact_url
 
 
-def write_run_report_html(run: RunPackage, output_path: str | Path | None = None) -> Path:
+def write_run_report_html(run: RunPackage, output_path: str | Path | None = None, *, analysis_limits=None) -> Path:
     path = Path(output_path) if output_path is not None else run.path / "report.html"
     path.parent.mkdir(parents=True, exist_ok=True)
     has_surface = any(
@@ -32,7 +32,7 @@ def write_run_report_html(run: RunPackage, output_path: str | Path | None = None
     plotly_asset = write_plotly_asset(path.parent) if has_surface else None
     plotly_url = artifact_url(plotly_asset, path.parent) if plotly_asset is not None else None
     path.write_text(
-        render_run_report_html(run, output_dir=path.parent, plotly_url=plotly_url), encoding="utf-8"
+        render_run_report_html(run, output_dir=path.parent, plotly_url=plotly_url, analysis_limits=analysis_limits), encoding="utf-8"
     )
     write_run_report_manifest(
         run, output_dir=path.parent, report_path=path, interactive_asset_path=plotly_asset
@@ -202,6 +202,7 @@ def render_run_report_html(
     *,
     compact: bool = False,
     plotly_url: str | None = None,
+    analysis_limits=None,
 ) -> str:
     experiment = run.run.get("experiment", {}) if isinstance(run.run.get("experiment"), dict) else {}
     restore = run.run.get("restore", {}) if isinstance(run.run.get("restore"), dict) else {}
@@ -233,7 +234,7 @@ def render_run_report_html(
         plotly_url=plotly_url if not compact else None,
     )
     artifact_links_block = "" if compact else _artifact_links_block(artifact_links)
-    signal_processing_block = "" if compact else _signal_processing_block(run, report_output_dir)
+    signal_processing_block = "" if compact else _signal_processing_block(run, report_output_dir, analysis_limits=analysis_limits)
     signals_block = "" if compact else _signals_block(signals)
     waveform_previews_block = "" if compact else _waveform_previews_block(waveform_previews)
     evidence_summary_block = "" if compact else _evidence_summary_block(evidence)
@@ -1971,7 +1972,7 @@ def _build_evidence_summary(
     )
 
 
-def _signal_processing_block(run: RunPackage, output_dir: Path) -> str:
+def _signal_processing_block(run: RunPackage, output_dir: Path, *, analysis_limits=None) -> str:
     rows: list[str] = []
     for step in run.steps:
         if step.get("kind") != "analysis.pipeline":
@@ -2040,7 +2041,7 @@ def _signal_processing_block(run: RunPackage, output_dir: Path) -> str:
     curves = render_analysis_sections([
         (run.path, str(step.get("id", step["index"])), step.get("artifact", {}))
         for step in run.steps if step.get("kind") == "analysis.pipeline"
-    ], details=False)
+    ], details=False, resource_limits=analysis_limits)
     return f"""<h2>信号处理 / Signal processing</h2>
 <div class="table compact-table"><table>
 <thead><tr><th>步骤 / Step</th><th>状态 / Status</th><th>来源 / Source</th><th>算子 / Operations</th><th>指标 / Metrics</th><th>警告 / Warnings</th><th>失败阶段 / Failed stage</th><th>产物 / Artifacts</th></tr></thead>

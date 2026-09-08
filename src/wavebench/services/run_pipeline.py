@@ -10,6 +10,8 @@ import tempfile
 from typing import Any, Callable, Iterator
 
 import numpy as np
+from wavebench.data.analysis_resources import AnalysisBudget, AnalysisLimits, AnalysisResourceError, check_static
+from wavebench.data.analysis_io import load_waveform, BLOCK_ROWS, read_json_bounded
 
 from wavebench.data.signal_pipeline import (
     FrequencySignal,
@@ -106,13 +108,16 @@ def execute_analysis_pipeline(
     step: RunStep,
     source_step: RunStep,
     source_record: RunStepRecord | None,
+    resource_limits: AnalysisLimits | None = None,
 ) -> dict[str, Any]:
+    limits = (resource_limits or AnalysisLimits()).tighten(step.fields.get("resources"))
+    check_static(step.fields["operations"], limits)
     processing_dir = run_dir / "processing" / (
         f"{step.index:02d}_{step.id or 'analysis_pipeline'}"
     )
     def load_source() -> tuple[dict[str, Any], np.ndarray]:
         _, details, waveform = _load_source_waveform(
-            run_dir=run_dir, source_step=source_step, source_record=source_record,
+            run_dir=run_dir, source_step=source_step, source_record=source_record, resource_limits=limits,
         )
         return details, waveform
 
@@ -123,6 +128,7 @@ def execute_analysis_pipeline(
             "status": source_record.status if source_record is not None else "unavailable",
         },
         load_source=load_source,
+        resource_limits=limits,
     )
 
 
@@ -130,7 +136,11 @@ def execute_pipeline(
     *, run_dir: Path, processing_dir: Path, fields: dict[str, Any],
     source: dict[str, Any], load_source: Callable[[], tuple[dict[str, Any], np.ndarray]],
     schema: str = ANALYSIS_PIPELINE_SCHEMA,
+    resource_limits: AnalysisLimits | None = None,
 ) -> dict[str, Any]:
+    limits = (resource_limits or AnalysisLimits()).tighten(fields.get("resources"))
+    check_static(fields["operations"], limits, metadata_files=3 if schema == "wavebench.offline_pipeline.v1" else 2)
+    budget = AnalysisBudget(limits)
     processing_dir.mkdir(parents=True, exist_ok=False)
     metrics_path = processing_dir / "metrics.json"
     manifest_path = processing_dir / "manifest.json"
@@ -160,7 +170,12 @@ def execute_pipeline(
     try:
         source_details, waveform = load_source()
         source.update(source_details)
-        signal: TimeSignal | FrequencySignal | PsdSignal = validate_waveform(waveform)
+        if isinstance(waveform, TimeSignal):
+            signal = waveform
+        else:
+            budget.source(len(waveform), np.asarray(waveform).dtype.itemsize)
+            signal = validate_waveform(waveform)
+        del waveform
         sampling = _time_sampling(signal)
         stages.append({"stage": "source", "status": "ok", "domain": "time"})
 
@@ -174,6 +189,9 @@ def execute_pipeline(
             }
             stages.append(stage)
             try:
+                count = len(signal.time_s) if isinstance(signal, TimeSignal) else len(signal.frequency_hz)
+                retained = sum(item.get("retained_count", 0) * 1024 for item in peaks)
+                stage["resources"] = budget.stage(operation, count, domain=_domain(signal), retained_bytes=retained)
                 if op == "remove_dc":
                     assert isinstance(signal, TimeSignal)
                     signal = remove_dc(signal)
@@ -225,6 +243,7 @@ def execute_pipeline(
                         "sample_interval_s": result.sample_interval_s,
                         "sample_rate_hz": result.sample_rate_hz,
                     })
+                    del result
                 elif op == "window":
                     assert isinstance(signal, TimeSignal)
                     signal = window_signal(signal, operation["name"])
@@ -285,11 +304,11 @@ def execute_pipeline(
                     peak_dir.mkdir(exist_ok=True)
                     json_path = peak_dir / f"{operation['name']}.json"
                     csv_path = peak_dir / f"{operation['name']}.csv"
-                    _atomic_write_json(json_path, detected)
+                    _atomic_write_json(json_path, detected, budget=budget)
                     columns = ["index", "position", "value", "prominence", "width", "polarity"]
                     _atomic_write_csv(csv_path, columns, np.asarray([
                         [row[key] for key in columns] for row in detected["peaks"]
-                    ]).reshape(-1, len(columns)))
+                    ]).reshape(-1, len(columns)), budget=budget)
                     metadata = {key: value for key, value in detected.items() if key != "peaks"}
                     metadata.update({
                         "json": _derived_relative(json_path, run_dir),
@@ -333,6 +352,7 @@ def execute_pipeline(
                         signal=signal,
                         name=operation["name"],
                         formats=operation["formats"],
+                        budget=budget,
                     ):
                         exported.append(item)
                         exports.append(item)
@@ -404,8 +424,20 @@ def execute_pipeline(
     if failure is not None:
         manifest["error"] = failure
 
-    _atomic_write_json(metrics_path, metrics_document)
-    _atomic_write_json(manifest_path, manifest)
+    manifest["resources"] = {**limits.evidence(), "work_units": budget.work_units,
+                             "data_output_bytes": budget.output_bytes,
+                             "data_output_files": budget.output_files}
+
+    try:
+        _atomic_write_json(metrics_path, metrics_document, budget=budget)
+        _atomic_write_json(manifest_path, manifest, budget=budget)
+    except AnalysisResourceError as exc:
+        # Diagnostic metadata is permitted after exhaustion, never a successful oversized result.
+        status, failed_stage = "failed", "metadata"
+        failure = error_envelope(exc, operation="analysis.pipeline.metadata")
+        manifest.update(status=status, failed_stage=failed_stage, error=failure, partial=bool(exports or peaks))
+        _atomic_write_json(metrics_path, metrics_document)
+        _atomic_write_json(manifest_path, manifest)
 
     pipeline_artifact: dict[str, Any] = {
         "schema": schema,
@@ -413,6 +445,7 @@ def execute_pipeline(
         "manifest": _derived_relative(manifest_path, run_dir),
         "metrics": _derived_relative(metrics_path, run_dir),
         "source_step": source.get("step"),
+        "resources": manifest["resources"],
         "source_status": source["status"],
         "operations": operations,
         "warnings": warnings,
@@ -557,7 +590,8 @@ def _load_source_waveform(
     run_dir: Path,
     source_step: RunStep,
     source_record: RunStepRecord | None,
-) -> tuple[Path, dict[str, Any], np.ndarray]:
+    resource_limits: AnalysisLimits | None = None,
+) -> tuple[Path, dict[str, Any], TimeSignal]:
     if source_record is None:
         raise DataError(f"source capture step {source_step.id!r} was not executed")
     package_text = source_record.artifact.get("package")
@@ -572,7 +606,7 @@ def _load_source_waveform(
         raise DataError(f"source capture package is unavailable: {package}")
     metadata_path = _resolve_package_member(package, metadata_text, label="metadata")
     try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata = read_json_bounded(metadata_path, resource_limits or AnalysisLimits())
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise DataError(f"source capture metadata is unreadable: {metadata_path}: {exc}") from exc
     if not isinstance(metadata, dict):
@@ -584,16 +618,13 @@ def _load_source_waveform(
     if not isinstance(npy_text, str) or not npy_text:
         raise DataError("source capture metadata has no NPY artifact")
     waveform_path = _resolve_package_member(package, npy_text, label="NPY")
-    try:
-        waveform = np.load(waveform_path, allow_pickle=False)
-    except Exception as exc:  # noqa: BLE001 - NumPy load errors become structured data errors
-        raise DataError(f"source capture NPY is unreadable: {waveform_path}: {exc}") from exc
+    waveform, source_hash = load_waveform(waveform_path, resource_limits or AnalysisLimits())
 
     return waveform_path, {
         "package": _run_relative(package, run_dir),
         "metadata": _run_relative(metadata_path, run_dir),
         "npy": _run_relative(waveform_path, run_dir),
-        "npy_sha256": _sha256_file(waveform_path),
+        "npy_sha256": source_hash,
     }, waveform
 
 
@@ -621,6 +652,7 @@ def _export_signal(
     signal: TimeSignal | FrequencySignal | PsdSignal,
     name: str,
     formats: list[str],
+    budget: AnalysisBudget | None = None,
 ) -> Iterator[dict[str, Any]]:
     exports_dir = processing_dir / "exports"
     exports_dir.mkdir(parents=True, exist_ok=True)
@@ -630,15 +662,26 @@ def _export_signal(
         columns = ["frequency_hz", "psd_v2_per_hz"]
     else:
         columns = ["frequency_hz", "real_v", "imaginary_v", "amplitude_v"]
-    data = signal.as_array()
+    if isinstance(signal, TimeSignal):
+        arrays = (signal.time_s, signal.voltage_v)
+    elif isinstance(signal, PsdSignal):
+        arrays = (signal.frequency_hz, signal.psd_v2_per_hz)
+    else:
+        arrays = (signal.frequency_hz, signal.spectrum_v.real, signal.spectrum_v.imag)
+    def blocks():
+        for start in range(0, len(arrays[0]), BLOCK_ROWS):
+            values = [array[start:start + BLOCK_ROWS] for array in arrays]
+            if isinstance(signal, FrequencySignal):
+                values.append(np.abs(signal.spectrum_v[start:start + BLOCK_ROWS]))
+            yield np.column_stack(values)
     for file_format in formats:
         target = exports_dir / f"{name}.{file_format}"
         if target.exists():  # pragma: no cover - parser prevents duplicate export names
             raise DataError(f"analysis export already exists: {target.name}")
         if file_format == "npy":
-            _atomic_write_npy(target, data)
+            _atomic_write_npy(target, None, blocks=blocks, shape=(len(arrays[0]), len(columns)), budget=budget)
         elif file_format == "csv":
-            _atomic_write_csv(target, columns, data)
+            _atomic_write_csv(target, columns, None, blocks=blocks, budget=budget)
         else:  # pragma: no cover - RunPlan validation owns this invariant
             raise DataError(f"unsupported analysis export format: {file_format}")
         yield {
@@ -650,40 +693,73 @@ def _export_signal(
         }
 
 
-def _atomic_write_json(path: Path, value: dict[str, Any]) -> None:
+def _atomic_write_json(path: Path, value: dict[str, Any], *, budget: AnalysisBudget | None = None) -> None:
     encoded = (
         json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
     ).encode("utf-8")
-    _atomic_write_bytes(path, encoded)
+    if budget:
+        budget.limits.check("max_metadata_bytes", len(encoded), "metadata write")
+    _atomic_write_bytes(path, encoded, budget=budget)
 
 
-def _atomic_write_npy(path: Path, data: np.ndarray) -> None:
+def _atomic_write_npy(path: Path, data: np.ndarray | None, *, blocks=None, shape=None,
+                      budget: AnalysisBudget | None = None) -> None:
+    if blocks is None:
+        shape = data.shape
+        def blocks():
+            return (data[start:start + BLOCK_ROWS] for start in range(0, len(data), BLOCK_ROWS))
     temporary = _temporary_path(path)
     try:
         with temporary.open("wb") as file:
-            np.save(file, data, allow_pickle=False)
+            np.lib.format.write_array_header_1_0(file, {"descr": np.dtype(float).str,
+                "fortran_order": False, "shape": shape})
+            for block in blocks():
+                encoded = np.asarray(block, dtype=float, order="C").tobytes()
+                if budget:
+                    budget.pending_file(file.tell() + len(encoded))
+                file.write(encoded)
             file.flush()
             os.fsync(file.fileno())
         os.replace(temporary, path)
+        if budget:
+            budget.committed_file(path.stat().st_size)
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def _atomic_write_csv(path: Path, columns: list[str], data: np.ndarray) -> None:
+def _atomic_write_csv(path: Path, columns: list[str], data: np.ndarray | None, *, blocks=None,
+                      budget: AnalysisBudget | None = None) -> None:
+    if blocks is None:
+        def blocks():
+            return (data[start:start + BLOCK_ROWS] for start in range(0, len(data), BLOCK_ROWS))
     temporary = _temporary_path(path)
     try:
         with temporary.open("w", newline="", encoding="utf-8") as file:
             writer = csv.writer(file)
             writer.writerow(columns)
-            writer.writerows(data.tolist())
+            for block in blocks():
+                # Only this bounded block becomes Python objects; numeric formatting stays unchanged.
+                import io
+                buffer = io.StringIO(newline="")
+                csv.writer(buffer).writerows(block.tolist())
+                encoded = buffer.getvalue()
+                if budget:
+                    budget.pending_file(file.tell() + len(encoded.encode("utf-8")))
+                file.write(encoded)
+            if budget:
+                budget.pending_file(file.tell())
             file.flush()
             os.fsync(file.fileno())
         os.replace(temporary, path)
+        if budget:
+            budget.committed_file(path.stat().st_size)
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def _atomic_write_bytes(path: Path, data: bytes) -> None:
+def _atomic_write_bytes(path: Path, data: bytes, *, budget: AnalysisBudget | None = None) -> None:
+    if budget:
+        budget.pending_file(len(data))
     temporary = _temporary_path(path)
     try:
         with temporary.open("xb") as file:
@@ -691,6 +767,8 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
             file.flush()
             os.fsync(file.fileno())
         os.replace(temporary, path)
+        if budget:
+            budget.committed_file(len(data))
     finally:
         temporary.unlink(missing_ok=True)
 

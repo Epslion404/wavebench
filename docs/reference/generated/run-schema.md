@@ -17,7 +17,7 @@ Top-level tables:
 Supported step kinds:
   - analysis.pipeline
       required: source, operations
-      optional : expect, on_failure
+      optional : expect, on_failure, resources
       note     : Process one earlier scope.capture NPY after all hardware sessions close. Uses a validated linear operator list, checks optional dependencies on demand, and never opens an instrument.
   - dmm.read
       required: -
@@ -244,6 +244,8 @@ scope.capture [steps.expect_fft] metrics:
   Common metrics: peak_frequency_hz, peak_amplitude_v, thd_ratio, harmonic_2_amplitude_v.
 
 analysis.pipeline metrics:
+  Optional [steps.resources] tightens the execution resource profile; --analysis-resources selects an explicit environment TOML profile.
+  Default resource admission bounds FIR taps, FFT length, working-set estimate, cumulative work/output and file counts before allocation. Actual source length is checked offline after capture.
   Time domain: voltage_min_v, voltage_max_v, voltage_mean_v, voltage_rms_v, voltage_vpp_v.
   Frequency domain: peak_frequency_hz, peak_amplitude_v, noise_floor_v, thd_ratio, and harmonic_2 through harmonic_5 frequency/amplitude fields.
   PSD domain: measure_band requires name, band_hz, exclude_hz and metrics=mean_square_v2|rms_v|noise_rms_v. Metric keys are <name>_<metric>.

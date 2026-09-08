@@ -214,12 +214,16 @@ def validate_waveform(data: Any) -> TimeSignal:
         array.dtype, np.complexfloating
     ):
         raise DataError("analysis pipeline input must contain real numeric values")
-    array = np.array(array, dtype=np.float64, copy=True)
-    if not np.all(np.isfinite(array)):
-        raise DataError("analysis pipeline input must contain only finite values")
-    if array.shape[0] > 1 and not np.all(np.diff(array[:, 0]) > 0):
-        raise DataError("analysis pipeline time axis must be strictly increasing")
-    return TimeSignal(time_s=array[:, 0], voltage_v=array[:, 1])
+    result = np.empty(array.shape, dtype=np.float64)
+    for start in range(0, len(array), 4096):
+        block = np.asarray(array[start:start + 4096], dtype=np.float64)
+        if not np.all(np.isfinite(block)):
+            raise DataError("analysis pipeline input must contain only finite values")
+        if (not np.all(np.diff(block[:, 0]) > 0)
+                or start and block[0, 0] <= result[start - 1, 0]):
+            raise DataError("analysis pipeline time axis must be strictly increasing")
+        result[start:start + len(block)] = block
+    return TimeSignal(time_s=result[:, 0], voltage_v=result[:, 1])
 
 
 def remove_dc(signal: TimeSignal) -> TimeSignal:

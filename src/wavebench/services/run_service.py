@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
 from wavebench.config import WaveBenchConfig
+from wavebench.data.analysis_resources import AnalysisLimits
 from wavebench.data.package import new_package_dir, safe_label
 from wavebench.data.packages import load_run_package
 from wavebench.errors import (
@@ -248,6 +249,7 @@ class RunService:
     config: WaveBenchConfig
     logger: CommandLogger
     lease_manager: ResourceLeaseManager | None = None
+    analysis_limits: AnalysisLimits | None = None
 
     def verify(self, plan: RunPlan) -> list[RunPreflightRecord]:
         self.check(plan)
@@ -309,6 +311,12 @@ class RunService:
         return records
 
     def check(self, plan: RunPlan) -> None:
+        from wavebench.data.analysis_resources import AnalysisLimits, check_static
+
+        for step in plan.steps:
+            if step.kind == "analysis.pipeline":
+                limits = (self.analysis_limits or AnalysisLimits()).tighten(step.fields.get("resources"))
+                check_static(step.fields["operations"], limits)
         check_run_plan_safety_limits(plan, self.config.safety_limits)
         reject_unsupported_steps(plan)
         ensure_analysis_pipeline_dependencies(plan)
@@ -708,9 +716,9 @@ class RunService:
         execution_intent: Mapping[str, Any] | None = None,
     ) -> RunResult:
         self.check(plan)
-        intent = build_execution_intent(plan, self.config)
+        intent = build_execution_intent(plan, self.config, resource_limits=self.analysis_limits)
         if execution_intent is not None:
-            intent = verify_execution_intent(execution_intent, plan, self.config)
+            intent = verify_execution_intent(execution_intent, plan, self.config, resource_limits=self.analysis_limits)
         plan_hash = intent.plan_digest
         analysis_steps = [step for step in plan.steps if step.kind == "analysis.pipeline"]
         hardware_steps = plan.steps[: len(plan.steps) - len(analysis_steps)]
@@ -1108,6 +1116,7 @@ class RunService:
                         step=step,
                         source_step=source_step,
                         source_record=source_record,
+                        resource_limits=self.analysis_limits,
                     )
                 except Exception as exc:  # noqa: BLE001 - preserve offline step failure
                     payload = error_envelope(

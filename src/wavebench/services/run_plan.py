@@ -190,7 +190,7 @@ _REQUIRED_FIELDS = {
 }
 
 _OPTIONAL_FIELDS = {
-    "analysis.pipeline": {"expect", "on_failure"},
+    "analysis.pipeline": {"expect", "on_failure", "resources"},
     "scope.auto": {"on_failure"},
     "scope.capture": {
         "channel",
@@ -460,6 +460,8 @@ def format_run_plan_schema() -> str:
         "  Common metrics: peak_frequency_hz, peak_amplitude_v, thd_ratio, harmonic_2_amplitude_v.",
         "",
         "analysis.pipeline metrics:",
+        "  Optional [steps.resources] tightens the execution resource profile; --analysis-resources selects an explicit environment TOML profile.",
+        "  Default resource admission bounds FIR taps, FFT length, working-set estimate, cumulative work/output and file counts before allocation. Actual source length is checked offline after capture.",
         "  Time domain: voltage_min_v, voltage_max_v, voltage_mean_v, voltage_rms_v, voltage_vpp_v.",
         "  Frequency domain: peak_frequency_hz, peak_amplitude_v, noise_floor_v, thd_ratio, and harmonic_2 through harmonic_5 frequency/amplitude fields.",
         "  PSD domain: measure_band requires name, band_hz, exclude_hz and metrics=mean_square_v2|rms_v|noise_rms_v. Metric keys are <name>_<metric>.",
@@ -1286,6 +1288,10 @@ def _normalize_analysis_pipeline_fields(prefix: str, fields: dict[str, Any]) -> 
 
 
 def normalize_analysis_operations(prefix: str, fields: dict[str, Any]) -> None:
+    if "resources" in fields:
+        from wavebench.data.analysis_resources import normalize_limits
+
+        fields["resources"] = normalize_limits(fields["resources"])
 
     raw_operations = fields["operations"]
     if not isinstance(raw_operations, list) or not raw_operations:
