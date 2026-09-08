@@ -1,5 +1,7 @@
 # run plan Reference
 
+信号处理的操作步骤与示例见[使用信号处理流水线](../how-to/signal-processing.md)。
+
 ## 独立离线配方
 
 `analysis` 命令直接处理历史 capture package，不需要仪器配置。显式选择一个通道，配方包含 `schema = "wavebench.analysis_recipe.v1"`、`operations` 和可选 `[expect]`／`[resources]`，共用下文的算子与验收合同。示例为 `plans/example_analysis_recipe.toml`。
@@ -38,7 +40,7 @@
 
 `analysis batch --manifest batch.toml --output <new-directory>` 读取 `wavebench.analysis_batch.v1` 清单。字段为 `recipe`、`entries`、`on_failure="stop|continue"`、`duplicates="reject|allow"`、`max_output_bytes`；路径相对于清单目录解析。每个 entry 必须有唯一安全 `id`、`capture` 和正整数 `channel`。同包同通道重复仅在 `allow` 时接受；条目最多 256 个，并受环境文件数上限约束。
 
-批次默认启用 R3 监督，每条分析的默认超时为 300 秒；可用 `--analysis-execution` 显式替换。一次只执行一个条目，取消停止整个批次，普通失败遵循清单的 stop／continue。`max_output_bytes` 不得超过环境总输出限额，历史 attempt、当前结果和索引都计入总额；索引预留空间可能使小配额提前耗尽。失败诊断可尽力超额保存，但批次状态为失败。
+批次默认启用独立分析进程监督，每条分析的默认超时为 300 秒；可用 `--analysis-execution` 显式替换。一次只执行一个条目，取消停止整个批次，普通失败遵循清单的 stop／continue。`max_output_bytes` 不得超过环境总输出限额，历史 attempt、当前结果和索引都计入总额；索引预留空间可能使小配额提前耗尽。失败诊断可尽力超额保存，但批次状态为失败。
 
 `--resume` 要求原批次目录，重新核对清单、配方、有效资源／执行配置、数值库版本、来源 metadata／NPY 摘要和已完成产物摘要。变化或损坏时拒绝复用，要求新的输出目录；未成功的条目写入新的 attempt 目录，保留旧文件。文件锁防止两个进程同时写同一批次。中断期间尚未完成的 attempt 不冒充已验证成功结果。
 
@@ -75,13 +77,11 @@ transfer 至少需要两个完整 Welch 段，固定 mean，并共用两路分�
 | `memory_bytes` | 不设置 | 可选的平台硬内存限额 |
 | `cgroup_root` | 不设置 | Linux 硬限额所需的已委派 cgroup v2 目录 |
 
-时间必须为有限正数，硬限额必须为 1～`2^63-1` 的整数；未知字段拒绝。执行配置属于环境，不加入 RunPlan step 或分析配方。未指定文件时保持同进程执行，R0 预算仍然有效。`check` 检查配置和平台能力，实际超时监督只作用于 `run`／`plan` 的分析阶段。
+时间必须为有限正数，硬限额必须为 1～`2^63-1` 的整数；未知字段拒绝。执行配置属于环境，不加入 RunPlan step 或分析配方。未指定文件时保持同进程执行，资源预算仍然有效。`check` 检查配置和平台能力，实际超时监督只作用于 `run`／`plan` 的分析阶段。
 
 指定文件后，每条分析链在独立 `spawn` 子进程执行。RunPlan 在硬件恢复、会话关闭和租约释放后启动分析，不传递仪器句柄。Ctrl+C 或 Service 的取消事件先请求协作退出，超过宽限期后 terminate，仍未退出时 kill；父进程确认退出后整理产物。普通失败和超时按 `on_failure` 决定后续分析，用户取消停止整个分析后缀。数值块、读写块与算子边界可协作取消；单次不可中断的原生调用依靠进程终止处理。
 
 Windows 硬限额使用 Job Object 的 job committed memory；Linux 使用 cgroup v2 的 `memory.max` 并设置 `memory.swap.max=0`，要求 memory controller 和 `cgroup.kill` 可用。两者统计口径不同，不称为等价的 RSS 配额。硬限额请求在预检时创建临时作用域并验证测试进程绑定，失败就拒绝；不自动提权或降级。父进程和绑定前的启动阶段不受该分析硬限额保护，分析进程也不是不可信代码沙箱。
-
-本地验证仅覆盖 Linux。Windows 原生 Job Object 测试由后续 PR 的既有 Windows Python 3.11／3.12 workflow 执行；真实 Linux cgroup 集成测试要求显式提供 `WAVEBENCH_TEST_CGROUP_ROOT`，无可写委派时跳过。平台测试未通过前，不把实现状态写作跨平台验收通过。
 
 ## 分析资源预算
 

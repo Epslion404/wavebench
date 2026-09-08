@@ -17,6 +17,8 @@ wavebench run check --plan plans/example_scope_expect_quality.toml
 
 ## 信号处理功能展示
 
+操作步骤与结果判读见[使用信号处理流水线](../docs/how-to/signal-processing.md)。
+
 `example_analysis_resources.toml` 是执行资源配置，不是 RunPlan 或处理配方。可通过 `--analysis-resources plans/example_analysis_resources.toml` 显式选用；字段与兼容边界见[资源预算说明](../docs/reference/run-schema.md#分析资源预算)。
 
 [完整 RunPlan 示例](example_signal_processing_pipeline.toml) 采集 CH1 一次，然后对同一份原始 NPY 执行三个独立分析步骤：
