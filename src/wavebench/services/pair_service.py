@@ -72,8 +72,14 @@ def load_pair_source(capture, fields, limits):
     before = _sha256_file(meta_path)
     metadata = read_json_bounded(meta_path, limits)
     evidence = metadata.get('synchronization')
-    if not isinstance(evidence, dict) or evidence.get('schema') != 'wavebench.capture_sync.v1' or evidence.get('kind') != 'synthetic':
-        raise DataError('pair requires explicit synthetic synchronization evidence; real driver evidence is not yet supported')
+    if not isinstance(evidence, dict) or evidence.get('schema') != 'wavebench.capture_sync.v1' or evidence.get('kind') not in ('synthetic', 'driver_frozen_single'):
+        raise DataError('pair requires explicit supported synchronization evidence')
+    if evidence.get('kind') == 'driver_frozen_single':
+        driver = evidence.get('driver', {})
+        identity = metadata.get('instrument', {}).get('idn', '')
+        parts = identity.split(',') if isinstance(identity, str) else []
+        if len(parts) != 4 or parts[1].strip() != driver.get('model') or parts[3].strip() != driver.get('firmware'):
+            raise DataError('driver synchronization model/firmware differs from capture identity')
     channels = (fields['reference_channel'], fields['response_channel'])
     entries = _capture_channels(metadata)
     paths, total = [], 0
@@ -268,9 +274,8 @@ def execute_pair(*, run_dir, processing_dir, capture, fields, limits, source, ex
 def execute_pair_step(*, run_dir, step, source_step, source_record, resource_limits=None, execution_policy=None, cancel_event=None):
     if source_record is None or not source_record.artifact.get('package'):
         raise DataError('pair source capture was not executed or has no package')
-    package = Path(source_record.artifact['package'])
-    if not package.is_absolute():
-        package = run_dir/package
+    # Capture records historically store paths relative to the process working directory.
+    package = Path(source_record.artifact['package']).resolve()
     limits = (resource_limits or AnalysisLimits()).tighten(step.fields.get('resources'))
     return execute_pair(run_dir=run_dir, processing_dir=run_dir/'processing'/f"{step.index:02d}_{step.id or 'analysis_pair'}",
         capture=package, fields=step.fields, limits=limits,

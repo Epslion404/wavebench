@@ -73,6 +73,8 @@ def build_execution_intent(plan: RunPlan, config: WaveBenchConfig, *, resource_l
     operations: list[dict[str, Any]] = []
     for step in plan.steps:
         operation_name = _STEP_OPERATIONS.get(step.kind, step.kind)
+        if step.kind == 'scope.capture' and step.fields.get('synchronized'):
+            operation_name = 'scope.capture_synchronized'
         spec = get_operation_spec(operation_name)
         fields = dict(step.fields)
         payload_ref = _payload_reference(

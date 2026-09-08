@@ -2254,6 +2254,8 @@ def _main(argv: list[str] | None = None) -> int:
                 channels = args.channel or [service.config.scope.default_channel]
                 for channel in channels:
                     service.require_high_impedance(channel, allow_50ohm=args.allow_50ohm)
+                if args.synchronized and len(channels) != 2:
+                    raise ConfigError("synchronized capture requires two channels")
                 if len(channels) == 1:
                     result = service.capture_waveform(channel=channels[0], label=args.label)
                     _print_waveform_summary(result.waveform)
@@ -2267,7 +2269,8 @@ def _main(argv: list[str] | None = None) -> int:
                     if result.commands_log_path is not None:
                         print(f"commands_log={result.commands_log_path}")
                     return 0
-                result = service.capture_waveforms(channels=channels, label=args.label)
+                result = service.capture_waveforms(channels=channels, label=args.label,
+                                                  **({"synchronized": True} if args.synchronized else {}))
                 for channel in channels:
                     _print_waveform_summary(result.waveforms[channel])
                     files = result.files.get(str(channel), {})

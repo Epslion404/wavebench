@@ -208,3 +208,11 @@ def test_rsinstrument_close_reports_backend_failure():
         transport.close()
 
     assert raised.value.failures == ({"component": "session", "type": "RuntimeError"},)
+
+
+@pytest.mark.parametrize('value,expected', [(True,'1'), (False,'0'), (1,'1'), ('1','1')])
+def test_opc_normalizes_boolean_backend_response(value, expected):
+    session = FakeSession()
+    session.query_opc = lambda: value
+    transport = RsInstrumentTransport('TCPIP::example::INSTR', session, CommandLogger())
+    assert transport.query_opc() == expected

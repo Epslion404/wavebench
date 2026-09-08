@@ -1549,6 +1549,7 @@ def build_parser() -> argparse.ArgumentParser:
     capture = scope_sub.add_parser("capture", help="Capture waveform data into an acquisition package")
     capture.add_argument("--channel", type=int, action="append", default=None, help="Capture channel; repeat for multiple channels")
     capture.add_argument("--label", default="capture")
+    capture.add_argument("--synchronized", action="store_true", help="Require driver-proven single frozen multichannel capture")
     capture.add_argument("--points", default=None, help="Override waveform points: def, max, or dmax")
     capture.add_argument(
         "--time-range",

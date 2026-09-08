@@ -435,6 +435,7 @@ _BUILTIN_SPECS = (
         risk_flags=("trigger", "acquisition_state", "temporary_transfer_setup"),
     ),
     _spec("scope.capture_multiple", "scope", required_capabilities=("scope.capture_waveforms",), effect="acquire", changed_fields=_SCOPE_CAPTURE_CHANGED_FIELDS, restore_coverage="capture-baseline-only", required_verified_fields=("scope.identity",), verification_fields=_SCOPE_CAPTURE_VERIFICATION_FIELDS, risk_flags=("trigger", "acquisition_state", "temporary_transfer_setup")),
+    _spec("scope.capture_synchronized", "scope", required_capabilities=("scope.capture_synchronized",), effect="acquire", changed_fields=_SCOPE_CAPTURE_CHANGED_FIELDS, restore_coverage="capture-baseline-only", required_verified_fields=("scope.identity",), verification_fields=_SCOPE_CAPTURE_VERIFICATION_FIELDS, risk_flags=("trigger", "acquisition_state", "temporary_transfer_setup")),
     _spec("scope.fetch_waveform", "scope", required_capabilities=("scope.fetch_waveform",), effect="acquire", changed_fields=_SCOPE_CAPTURE_CHANGED_FIELDS, restore_coverage="capture-baseline-only", required_verified_fields=("scope.identity",), verification_fields=_SCOPE_CAPTURE_VERIFICATION_FIELDS, risk_flags=("acquisition_state", "temporary_transfer_setup")),
     _spec("scope.capture_average", "scope", required_capabilities=("scope.capture_average",), effect="acquire", changed_fields=("acquisition", "waveform_package"), risk_flags=("trigger", "acquisition_state")),
     _spec("scope.digital_status", "scope", required_capabilities=("scope.digital_status",), effect="stateful_read"),

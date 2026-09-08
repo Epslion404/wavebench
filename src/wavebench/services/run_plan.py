@@ -196,7 +196,7 @@ _OPTIONAL_FIELDS = {
     "analysis.pair": {"expect", "on_failure", "resources"},
     "scope.auto": {"on_failure"},
     "scope.capture": {
-        "channel",
+        "channel", "channels", "synchronized",
         "label",
         "points",
         "time_range_s",
@@ -343,7 +343,7 @@ for _step_kind, _step_fields in _OPTIONAL_FIELDS.items():
 
 
 _STEP_NOTES = {
-    "analysis.pair": "Analyze two evidence-validated channels from one earlier capture package after hardware cleanup. Currently accepts synthetic synchronization evidence only; real driver adaptation is not supported.",
+    "analysis.pair": "Analyze two evidence-validated channels from one earlier capture package after hardware cleanup. Accepts synthetic or driver-owned frozen-single synchronization evidence.",
     "analysis.pipeline": "Process one earlier scope.capture NPY after all hardware sessions close. Uses a validated linear operator list, checks optional dependencies on demand, and never opens an instrument.",
     "scope.auto": "Explicit RTM2032 AUToscale. It changes front-panel settings and is never inserted implicitly.",
     "scope.capture": "Trigger one acquisition, write a capture package, and optionally evaluate quality/expect checks. Use target_vpp or vertical_scale_v_per_div to fit the waveform vertically before capture.",
@@ -470,8 +470,9 @@ def format_run_plan_schema() -> str:
         "  Frequency domain: peak_frequency_hz, peak_amplitude_v, noise_floor_v, thd_ratio, and harmonic_2 through harmonic_5 frequency/amplitude fields.",
         "  PSD domain: measure_band requires name, band_hz, exclude_hz and metrics=mean_square_v2|rms_v|noise_rms_v. Metric keys are <name>_<metric>.",
         "",
+        "  scope.capture synchronized=true requires channels=[1,2], save_npy=true and DEF points; single-channel quality/auto-retry fields are not accepted. Requires scope.capture_synchronized capability.",
         "analysis.pair: reference_channel and response_channel must be distinct; source uses one earlier scope.capture with explicit save_npy=true.",
-        "  Pair operations: delay (integer lag), transfer (mean Welch H1/coherence), export. Only synthetic synchronization evidence is currently accepted.",
+        "  Pair operations: delay (integer lag), transfer (mean Welch H1/coherence), export. Synthetic and driver_frozen_single evidence are accepted.",
         "  spectral_quality requires explicit integration bands, fundamental mode, harmonic orders, detection thresholds and metrics; only mean Welch PSD is accepted.",
         "  Quality metrics: snr_db, sinad_db, sfdr_db, thdn_ratio, fundamental_frequency_hz, fundamental_power_v2, harmonic_power_v2, noise_power_v2, noise_bandwidth_hz, spur_frequency_hz, spur_power_v2, spur_dbc.",
         "analysis.pipeline PSD operation:",
@@ -725,6 +726,17 @@ def _normalize_step_fields(index: int, kind: str, fields: dict[str, Any]) -> Non
     if kind in {"analysis.pipeline", "analysis.pair"}:
         _normalize_analysis_pipeline_fields(prefix, fields, pair=kind == "analysis.pair")
     elif kind == "scope.capture":
+        if "synchronized" in fields and type(fields['synchronized']) is not bool:
+            raise ConfigError('scope.capture synchronized must be boolean')
+        if "channels" in fields or fields.get('synchronized'):
+            if fields.get('synchronized') is not True or fields.get('channels') != [1, 2] or any(type(ch) is not int for ch in fields['channels']):
+                raise ConfigError('synchronized scope.capture requires channels=[1,2]')
+            forbidden = {'channel', 'quality_gate', 'auto_recover', 'autoscale_before_capture', 'expect', 'expect_fft'} & set(fields)
+            if forbidden:
+                raise ConfigError('synchronized scope.capture does not accept single-channel quality/retry fields')
+            if fields.get('save_npy') is not True or not isinstance(fields.get('points', 'DEF'), str) or fields.get('points', 'DEF').upper() != 'DEF':
+                raise ConfigError('synchronized scope.capture requires save_npy=true and DEF points')
+            fields['points'] = 'DEF'
         if "label" in fields:
             fields["label"] = _non_empty_str(fields["label"], f"{prefix}.label")
         if "points" in fields:

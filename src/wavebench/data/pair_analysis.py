@@ -87,13 +87,26 @@ def check_pair_static(operations, limits, metadata_files=2):
 def validate_sync(reference, response, evidence, channels):
     if not isinstance(evidence, dict) or evidence.get('schema') != 'wavebench.capture_sync.v1':
         raise DataError('pair source requires wavebench.capture_sync.v1 synchronization evidence')
-    if evidence.get('kind') != 'synthetic':
-        raise DataError('driver synchronization evidence is not yet supported; synthetic evidence only')
+    kind = evidence.get('kind')
+    if kind not in ('synthetic', 'driver_frozen_single'):
+        raise DataError('unsupported synchronization kind; synthetic or driver_frozen_single required')
+    if kind == 'driver_frozen_single':
+        driver, procedure = evidence.get('driver'), evidence.get('procedure')
+        if (not isinstance(driver, dict) or not all(isinstance(driver.get(k), str) and driver[k] for k in ('id', 'model', 'firmware'))
+                or not isinstance(procedure, dict) or not isinstance(procedure.get('contract'), str) or not procedure['contract']
+                or type(procedure.get('single_count')) is not int or procedure['single_count'] != 1
+                or any(procedure.get(k) is not True for k in ('single_opc', 'stop_opc_before', 'stop_opc_after'))
+                or procedure.get('reads') != [{'channel': ch, 'configuration_unchanged': True} for ch in sorted(channels)]
+                or not isinstance(procedure.get('configuration'), dict) or not procedure['configuration']):
+            raise DataError('driver frozen-single proof is incomplete')
+        producer = evidence.get('producer', {})
+        if not isinstance(producer, dict) or producer.get('name') != driver['id'] or producer.get('version') != procedure['contract']:
+            raise DataError('driver proof producer and procedure do not match')
     if evidence.get('status') != 'verified':
         raise DataError('synchronization evidence must be verified')
     producer, group, guarantees = evidence.get('producer', {}), evidence.get('acquisition_group', {}), evidence.get('guarantees', {})
     if (not isinstance(producer, dict) or not all(isinstance(producer.get(k), str) and producer[k] for k in ('name', 'version'))
-            or not isinstance(group, dict) or group.get('source') != 'synthetic' or not isinstance(group.get('id'), str) or not group['id']
+            or not isinstance(group, dict) or group.get('source') != kind or not isinstance(group.get('id'), str) or not group['id']
             or not isinstance(guarantees, dict) or guarantees.get('single_record') is not True or guarantees.get('frozen_read') is not True
             or any(not isinstance(evidence.get(k), str) or not evidence[k] for k in ('timebase_id', 'record_id'))):
         raise DataError('incomplete synchronization provenance, timebase or acquisition guarantee')
@@ -114,16 +127,18 @@ def validate_sync(reference, response, evidence, channels):
         if integer(item['samples'], 'sync samples', 1, 2**63-1) != len(signal.time_s):
             raise DataError('synchronization sample count disagrees with NPY')
         for key in ('time_start_s', 'sample_interval_s', 'skew_s', 'uncertainty_s'):
+            if kind == 'driver_frozen_single' and key in ('skew_s', 'uncertainty_s') and item[key] is None:
+                continue
             if type(item[key]) not in (int, float) or not np.isfinite(item[key]):
                 raise DataError('synchronization values must be finite')
-        if item['uncertainty_s'] < 0 or abs(item['sample_interval_s'] - dt) > tolerance or abs(item['time_start_s'] - signal.time_s[0]) > tolerance:
+        if (item['uncertainty_s'] is not None and item['uncertainty_s'] < 0) or abs(item['sample_interval_s'] - dt) > tolerance or abs(item['time_start_s'] - signal.time_s[0]) > tolerance:
             raise DataError('synchronization time origin, interval or uncertainty disagrees with NPY')
     for start in range(0, len(reference.time_s), 4096):
         checkpoint()
         if np.any(np.abs(reference.time_s[start:start+4096] - response.time_s[start:start+4096]) > tolerance):
             raise DataError('pair time axes differ beyond dt * 1e-6')
     return {'samples': len(reference.time_s), 'sample_interval_s': dt, 'axis_atol_s': tolerance,
-            'evidence_kind': 'synthetic', 'delay_scope': 'measurement_chain_uncalibrated'}
+            'evidence_kind': kind, 'delay_scope': 'measurement_chain_uncalibrated'}
 
 
 def delay_estimate(x, y, operation, budget):

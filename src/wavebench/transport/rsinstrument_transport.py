@@ -392,7 +392,9 @@ class RsInstrumentTransport:
         def read_once() -> str:
             nonlocal attempts
             attempts += 1
-            return str(self.session.query_opc()).strip()
+            result = self.session.query_opc()
+            # RsInstrument versions return bool as well as the documented integer.
+            return ("1" if result else "0") if isinstance(result, bool) else str(result).strip()
 
         try:
             response = self._read_with_policy("query_opc", "*OPC?", replay, read_once)

@@ -492,7 +492,7 @@ class RunService:
                 if self.config.autoscale.check_errors:
                     add("scope", "scope.errors")
             elif step.kind == "scope.capture":
-                add("scope", "scope.idn", "scope.capture_waveform")
+                add("scope", "scope.idn", "scope.capture_synchronized" if step.fields.get('synchronized') else "scope.capture_waveform")
                 if self.config.scope.check_errors:
                     add("scope", "scope.errors")
                 if step.fields.get("screenshot", self.config.output.save_screenshot):
@@ -2874,6 +2874,10 @@ class RunService:
         service = self._scope_service_for_capture(plan, step, services=services)
         channel = step.fields.get("channel", self.config.scope.default_channel)
         label = step.fields.get("label", f"{plan.label}_{step.index:02d}_capture")
+        if step.fields.get('synchronized'):
+            capture = service.capture_waveforms(channels=step.fields['channels'], label=label, synchronized=True)
+            return {'package': str(capture.package_dir), 'metadata': str(capture.metadata_path),
+                    'synchronization': {'status': 'verified'}, 'channels': step.fields['channels']}
         autoscale_before_capture = step.fields.get("autoscale_before_capture", False)
         autoscale_settle_s = step.fields.get("autoscale_settle_s", 0.0)
         autoscale_record: dict[str, Any] | None = None

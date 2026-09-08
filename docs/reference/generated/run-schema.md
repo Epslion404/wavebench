@@ -18,7 +18,7 @@ Supported step kinds:
   - analysis.pair
       required: source, reference_channel, response_channel, operations
       optional : expect, on_failure, resources
-      note     : Analyze two evidence-validated channels from one earlier capture package after hardware cleanup. Currently accepts synthetic synchronization evidence only; real driver adaptation is not supported.
+      note     : Analyze two evidence-validated channels from one earlier capture package after hardware cleanup. Accepts synthetic or driver-owned frozen-single synchronization evidence.
   - analysis.pipeline
       required: source, operations
       optional : expect, on_failure, resources
@@ -95,7 +95,7 @@ Supported step kinds:
       note     : Explicit RTM2032 AUToscale. It changes front-panel settings and is never inserted implicitly.
   - scope.capture
       required: -
-      optional : auto_recover, autoscale_before_capture, autoscale_settle_s, channel, expect, expect_fft, expect_frequency_hz, frequency_tolerance, label, on_failure, points, quality_gate, safety_gate, save_csv, save_npy, screenshot, target_cycles, target_vpp, time_range_s, vertical_scale_v_per_div, window_frequency_hz
+      optional : auto_recover, autoscale_before_capture, autoscale_settle_s, channel, channels, expect, expect_fft, expect_frequency_hz, frequency_tolerance, label, on_failure, points, quality_gate, safety_gate, save_csv, save_npy, screenshot, synchronized, target_cycles, target_vpp, time_range_s, vertical_scale_v_per_div, window_frequency_hz
       note     : Trigger one acquisition, write a capture package, and optionally evaluate quality/expect checks. Use target_vpp or vertical_scale_v_per_div to fit the waveform vertically before capture.
   - sleep
       required: duration_s
@@ -254,8 +254,9 @@ analysis.pipeline metrics:
   Frequency domain: peak_frequency_hz, peak_amplitude_v, noise_floor_v, thd_ratio, and harmonic_2 through harmonic_5 frequency/amplitude fields.
   PSD domain: measure_band requires name, band_hz, exclude_hz and metrics=mean_square_v2|rms_v|noise_rms_v. Metric keys are <name>_<metric>.
 
+  scope.capture synchronized=true requires channels=[1,2], save_npy=true and DEF points; single-channel quality/auto-retry fields are not accepted. Requires scope.capture_synchronized capability.
 analysis.pair: reference_channel and response_channel must be distinct; source uses one earlier scope.capture with explicit save_npy=true.
-  Pair operations: delay (integer lag), transfer (mean Welch H1/coherence), export. Only synthetic synchronization evidence is currently accepted.
+  Pair operations: delay (integer lag), transfer (mean Welch H1/coherence), export. Synthetic and driver_frozen_single evidence are accepted.
   spectral_quality requires explicit integration bands, fundamental mode, harmonic orders, detection thresholds and metrics; only mean Welch PSD is accepted.
   Quality metrics: snr_db, sinad_db, sfdr_db, thdn_ratio, fundamental_frequency_hz, fundamental_power_v2, harmonic_power_v2, noise_power_v2, noise_bandwidth_hz, spur_frequency_hz, spur_power_v2, spur_dbc.
 analysis.pipeline PSD operation:
