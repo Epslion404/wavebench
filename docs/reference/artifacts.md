@@ -26,6 +26,13 @@ NPY 来源先检查有界 header、实数 dtype、二维形状和文件长度，
 
 本页说明 `run plan` 写入的运行产物入口。字段的 machine source 是 `src/wavebench/services/run_artifacts.py` 和对应的 typed result；不要从旧 Guide 推断新增或可选字段。
 
+
+显式 `--analysis-execution` 使用 `wavebench.execution_intent.v3`，以 `analysis_execution` 绑定规范化监督配置；同时指定资源文件时继续包含 `analysis_resources`。无执行配置时继续使用 v1／v2。估算器从 `conservative.v1` 升为 `conservative.v2` 后，绑定旧估算器的显式资源 intent 需要重新生成。
+
+监督模式在 manifest 与 step artifact 中记录 `execution`：配置、启动方式、实际内存后端与口径、退出码、耗时、触发原因及是否强制终止。结构化错误使用 `analysis_cancelled`、`analysis_timeout`、`analysis_worker_failed`，外层状态仍为 `failed`。Linux 有明确证据时记录 `oom_kill_count`；未知退出不推断成 OOM。报告展示监督结果、超时值、内存后端及强制终止标记。
+
+每个阶段和完成的导出保存检查点。强制终止后，父进程以最后一个完整检查点恢复指标及导出索引，保留所有已原子提交的数据文件；`committed_files` 列出终止时实际保留的文件，包含尚未来得及更新导出索引的文件。仅清理当前分析目录内的临时文件。检查点不代表阶段成功；运行中的阶段在终态中改为失败。检查点和最终元数据的磁盘占用按当前文件计，不按反复写入的累计流量计；失败诊断沿用配额外尽力保存规则。
+
 ## 输出
 
 成功或失败的 run 在写入运行目录后会产生以下文件：

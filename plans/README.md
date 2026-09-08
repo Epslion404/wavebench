@@ -113,3 +113,5 @@ off_power_channels = [1]
 安全门触发后会先对列出的信号源和电源通道执行 OFF，再停止 run；即使该 step 声明 `on_failure = "continue"` 也不会绕过安全门。若同时启用 source restore，恢复配置后会再次确认这些授权通道为 OFF，避免恢复操作重新打开输出。OFF 操作的结果、失败原因和授权通道会写入该 step 的 artifact 与 `run.json`。没有声明 OFF 目标时，安全门会拒绝继续并保留失败证据；它不会猜测或自动开启其他输出。
 
 公开计划应使用保留地址、占位符和相对路径；不要把真实 IP、序列号、串口路径或 `data/` 下的实验产物写进仓库。
+
+资源与执行环境配置可组合使用：`example_analysis_resources.toml` 设置预算，`example_analysis_execution.toml` 启用独立分析进程、超时和可选硬内存限制。两者都不是 RunPlan，不放入 `--plan`。
