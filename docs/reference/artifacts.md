@@ -156,3 +156,9 @@ recovered, expect_status, expect_failures, expect_fft_status, expect_fft_failure
 显式同步 capture 在 metadata 中写入 `synchronization`，使用 `wavebench.capture_sync.v1` 的 `driver_frozen_single` 类型。driver 字段记录驱动 ID、型号与固件；procedure 记录插件流程版本、一次采集设置、完成／冻结确认、逐通道配置检查和诊断配置。acquisition group 是主机事务标识，不是硬件采集序号；未提供硬件序号时为 null。任一通道读取或证据校验失败，部分波形可保留，但失败包不得带 verified 同步证明。
 
 原始 NPY 与 metadata 不因离线分析被改写。RunPlan capture 的 package 路径沿用工作目录相对路径约定；pair 入口在执行前解析绝对位置，包内文件仍受路径越界检查。未校准的链路时延和相干结果不构成 DUT 精密延迟校准。
+
+## 源恢复声明与结果
+
+声明恢复能力的插件在 `provenance.source_restore_coverage` 记录是否请求恢复、版本化声明及未覆盖项；任意波上传 step 还记录 `artifact.restore_coverage`。没有声明的上传记录 supported 为 null，不能推断为完整可恢复。未请求恢复不产生伪造的成功结果。
+
+采用独立恢复入口时，`restore.results` 按通道记录声明、status、实际回读或结构化 error。状态包括 not_started、restoring、verified、failed；只有覆盖字段验证完成才标 verified。安全门覆盖输出目标时另记 `output_override="safety_gate_off"`，原快照保持。HTML 展示范围、未覆盖项和逐通道结果；整体恢复状态仅表示请求的基础范围。旧插件的记录形状保持不变。

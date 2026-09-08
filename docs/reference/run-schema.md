@@ -332,3 +332,11 @@ PSD 可以跟在去直流、去趋势或 FIR／IIR 之后，但不能跟在整�
 时域指标为 `voltage_min_v`、`voltage_max_v`、`voltage_mean_v`、`voltage_rms_v` 和 `voltage_vpp_v`。频域指标为 `peak_frequency_hz`、`peak_amplitude_v`、`noise_floor_v`、`thd_ratio`，以及 `harmonic_2`～`harmonic_5` 的 `frequency_hz` 和 `amplitude_v` 字段。`[steps.expect]` 只能引用流水线中已显式选择的测量指标。
 
 完整示例见 `plans/example_signal_processing_pipeline.toml`。数值定义和派生产物结构见[运行产物 Reference](artifacts.md)。旧 `scope.capture` 的 `expect_fft` 保持原有算法，不由新流水线重定义。
+
+## 基础源恢复范围
+
+`[restore] source_state = true` 要求基础状态恢复，不能解释为完整仪器备份。插件可声明覆盖字段、未覆盖字段和支持恢复的操作；不支持所请求恢复时，`run check` 在连接仪器前拒绝。执行阶段还会先读取并验证全部恢复快照，初态不能恢复时不执行实验步骤。
+
+`source.arb_load` 与恢复组合要求插件明确支持，且上传通道必须包含在 source_channels（或默认恢复通道）中。易失任意波内容可以明确排除；基础参数恢复成功不表示旧任意波内容已恢复。没有恢复要求时可以执行上传，但报告仍展示覆盖范围。查看声明可用 `plugin info <driver-id> --load`。
+
+恢复先关闭输出、恢复并验证参数，最后按目标处理输出；安全门要求 OFF 的通道不会因快照原来为 ON 而重新启用。恢复失败仍使 run 失败，并阻止离线分析后缀。驱动开发合同见[插件开发](../development/plugin-development.md)，结果字段见[产物 Reference](artifacts.md)。

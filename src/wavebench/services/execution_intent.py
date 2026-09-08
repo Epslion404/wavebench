@@ -113,6 +113,11 @@ def build_execution_intent(plan: RunPlan, config: WaveBenchConfig, *, resource_l
 
     safety = _safe_parameters(asdict(plan.safety))
     restore = _safe_parameters(asdict(plan.restore))
+    if config.source is not None and (plan.restore.source_state or any(s.kind.startswith("source.") for s in plan.steps)):
+        from wavebench.instruments.registry import resolve_instrument_descriptor
+        descriptor = resolve_instrument_descriptor(config.source.driver, expected_kind="source")
+        if getattr(descriptor, "source_restore", None) is not None:
+            restore["source_contract"] = _safe_parameters(descriptor.source_restore.as_dict())
     body = {
         "plan_digest": plan_hash,
         "config_digest": config_hash,

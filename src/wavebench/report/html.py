@@ -251,6 +251,25 @@ def render_run_report_html(
     restore_block = ""
     if restore:
         restore_block = f"<p><b>恢复 / Restore:</b> {escape(str(restore.get('status', 'unknown')))}</p>"
+    provenance = run.run.get("provenance")
+    coverage = provenance.get("source_restore_coverage") if isinstance(provenance, dict) else None
+    if isinstance(coverage, dict):
+        declaration = coverage.get("declaration", {})
+        restored_fields = ", ".join(declaration.get("fields", ()))
+        uncovered = ", ".join(coverage.get("uncovered", ()))
+        restore_block += (
+            "<h2>源恢复范围 / Source restoration coverage</h2>"
+            f"<p>请求恢复 / Requested: {escape(str(coverage.get('requested')))}</p>"
+            f"<p>覆盖字段 / Covered: {escape(restored_fields or 'undeclared')}</p>"
+            f"<p>未覆盖 / Not covered: {escape(uncovered or 'none declared')}</p>"
+        )
+        for result in restore.get("results", []):
+            restore_block += (
+                f"<p>CH{escape(str(result.get('channel')))}: {escape(str(result.get('status')))}"
+                f" {escape(str(result.get('output_override', '')))}</p>"
+            )
+            if result.get("error"):
+                restore_block += f"<pre>{escape(str(result['error']))}</pre>"
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>

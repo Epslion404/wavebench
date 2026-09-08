@@ -52,6 +52,7 @@ CAPABILITY_METHODS: dict[str, tuple[str, ...]] = {
     "source.idn": ("idn",),
     "source.errors": ("errors", "assert_no_errors"),
     "source.status": ("get_status",),
+    "source.restore_state": ("snapshot_basic_state", "restore_basic_state"),
     "source.channel_profile": ("get_channel_profile",),
     "source.coupling_profile": ("get_coupling_profile",),
     "source.coupling_configure": ("configure_coupling",),

@@ -1260,6 +1260,8 @@ _BUILTIN_SPECS = (
     ),
     _spec("source.set_square_duty_cycle", "source", required_capabilities=("source.set_square_duty_cycle",), effect="write", changed_fields=("square_duty_cycle",), restore_coverage="basic", risk_flags=("signal_output", "state_drift")),
     _spec("source.arbitrary_probe", "source", required_capabilities=("source.arbitrary_probe",), effect="stateful_read"),
+    _spec("source.restore_snapshot", "source", required_capabilities=("source.restore_state", "source.idn"), effect="stateful_read"),
+    _spec("source.restore_state", "source", required_capabilities=("source.restore_state", "source.idn"), effect="write", changed_fields=("basic_state",), risk_flags=("signal_output",)),
     _spec("source.arbitrary_upload", "source", required_capabilities=("source.arbitrary_upload",), effect="write", changed_fields=("arbitrary_payload",), risk_flags=("signal_output", "volatile_payload")),
     _spec(
         "rf_source.idn",

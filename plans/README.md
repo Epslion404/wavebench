@@ -133,4 +133,4 @@ python -m wavebench analysis report /tmp/wavebench-pair --output /tmp/wavebench-
 
 Windows 可将 `/tmp/...` 替换为本地新目录。高级指标窗口按示例的 16384 Hz 采样率设计；换用历史包前需要按实际采样率和频率分辨率修改窗口及频带。缺少同步证据的真实旧包不适用于双通道示例，可用于单通道及批量流程验证。
 
-`example_synchronized_pair.toml` 演示已有外部激励下的真实双通道冻结采集与分析，需要驱动声明 `scope.capture_synchronized`。计划本身不打开信号源；采集会修改示波器时基、垂直设置并保持 STOP。先按实际信号幅度与安全条件调整配置，再执行 `run check` 和实时预检。DG 易失性 ARB 上传后的恢复需要明确保存基础源快照；通用基础 setter 不能保证从 USER 状态恢复，更不能恢复已覆盖的 ARB 内存。
+`example_synchronized_pair.toml` 演示已有外部激励下的真实双通道冻结采集与分析，需要驱动声明 `scope.capture_synchronized`。计划本身不打开信号源；采集会修改示波器时基、垂直设置并保持 STOP。先按实际信号幅度与安全条件调整配置，再执行 `run check` 和实时预检。DG 易失性 ARB 上传与 RunPlan 基础恢复组合需要插件声明独立恢复能力；Core 使用写入前的基础快照调用恢复入口。被覆盖的 ARB 内存不在恢复范围内。

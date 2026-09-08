@@ -334,6 +334,17 @@ class RunService:
         self._check_frequency_response_resumes(plan)
         self._check_rf_source_access(plan)
         self._check_plan_capabilities(plan)
+        self._source_restore_coverage(plan)
+
+    def _source_restore_coverage(self, plan):
+        from .run_restore import source_restore_coverage
+        if not plan.restore.source_state and not any(s.kind.startswith("source.") for s in plan.steps):
+            return None
+        cfg = self.config.source
+        if cfg is None:
+            return None
+        descriptor = resolve_instrument_descriptor(cfg.driver, expected_kind="source")
+        return source_restore_coverage(plan, descriptor, cfg.default_channel)
 
     def _check_rf_source_access(self, plan: RunPlan) -> None:
         """Reject RF operations by access policy before run lifecycle opens a session."""
@@ -468,6 +479,10 @@ class RunService:
                 source.driver,
                 expected_kind="source",
             )
+            if getattr(descriptor, "source_restore", None) is not None:
+                if descriptor.source_restore.supported:
+                    add("source", "source.restore_state", "source.idn")
+                return
             v2_restore = {
                 "source.snapshot_v2",
                 "source.basic_configure_v2",
@@ -761,6 +776,10 @@ class RunService:
                 },
             }
 
+            coverage = self._source_restore_coverage(plan)
+            if coverage is not None:
+                provenance["source_restore_coverage"] = coverage
+
             def append_source_operation_artifact(value: object) -> None:
                 if isinstance(value, dict):
                     source_operations.append(value)
@@ -906,6 +925,8 @@ class RunService:
                             status="failed",
                             artifact={**record.artifact, "safety_gate": gate_result},
                         )
+                    if step.kind == "source.arb_load" and coverage is not None:
+                        record = replace(record, artifact={**record.artifact, "restore_coverage": coverage})
                     records.append(record)
                     write_step_record(steps_dir, record)
                     self._update_frequency_responses_manifest(run_dir, record)
@@ -1032,6 +1053,7 @@ class RunService:
 
             restore_error = restore_source_state(
                 restore_state,
+                force_off_channels=tuple((safety_gate_config or {}).get("source_channels", ())),
                 source_service_factory=lambda: self._source_service(services=services),
             )
             if (

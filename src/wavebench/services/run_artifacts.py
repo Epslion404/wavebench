@@ -104,6 +104,9 @@ def write_run_files(
             "snapshots": snapshots,
             "status": "failed" if restore_error is not None else "ok",
         }
+        results = [state.restore_evidence for state in restore_state if getattr(state, "restore_evidence", None) is not None]
+        if results:
+            run_data["restore"]["results"] = results
         if len(restore_state) == 1:
             run_data["restore"]["source_channel"] = restore_state[0].channel
             run_data["restore"]["snapshot"] = restore_state[0].as_dict()

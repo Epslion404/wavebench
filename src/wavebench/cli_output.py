@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Any
 
@@ -215,6 +216,8 @@ def _print_instrument_descriptor(descriptor: InstrumentDescriptor) -> None:
     print(f"distribution_version={descriptor.version}")
     print(f"source={descriptor.source}")
     print("permissions=" + ", ".join(descriptor.permissions))
+    if descriptor.source_restore is not None:
+        print("source_restore=" + json.dumps(descriptor.source_restore.as_dict(), ensure_ascii=False))
     extensions = descriptor.scope_extensions
     if extensions is not None:
         profiles = [

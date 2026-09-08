@@ -704,12 +704,13 @@ def test_source_descriptor_append_only_and_replace_compatible() -> None:
     descriptor = source_descriptor(driver=SourceV2FakeDriver(combined=True))
     names = [item.name for item in fields(InstrumentDescriptor)]
 
-    assert names[-5:] == [
+    assert names[-6:] == [
         "config_fields",
         "resource_schemes",
         "scope_extensions",
         "source_extensions",
         "rf_source_extensions",
+        "source_restore",
     ]
     assert replace(descriptor, summary="changed").source_extensions is descriptor.source_extensions
 
@@ -3444,7 +3445,7 @@ def test_source_v1_capability_mapping_is_unchanged() -> None:
     actual = {
         key: value
         for key, value in CAPABILITY_METHODS.items()
-        if key.startswith("source.") and not key.endswith("_v2")
+        if key.startswith("source.") and not key.endswith("_v2") and key != "source.restore_state"
     }
     assert actual == expected
 

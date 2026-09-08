@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from wavebench.errors import error_envelope
+
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field as dataclass_field
@@ -10776,7 +10778,31 @@ class SourceService(SessionStateAliasMixin):
             check_errors=source_cfg.check_errors,
         )
 
+    def _native_restore_profile(self):
+        self._declared_source_capabilities()
+        return getattr(self.descriptor, "source_restore", None)
+
     def snapshot_restorable_state(self, channel: int | None = None) -> RestorableSourceState:
+        profile = self._native_restore_profile()
+        if profile is not None:
+            if not profile.supported:
+                raise ConfigError("source plugin does not support basic-state restoration")
+            from dataclasses import replace
+            self._require("source.restore_snapshot", "source.restore_state", "source.idn")
+            cfg = self._source_config()
+            target = cfg.default_channel if channel is None else channel
+            with self._source_session() as source:
+                identity = source.idn()
+                status = source.snapshot_basic_state(target)
+                state = RestorableSourceState.from_status(status)
+                if status.channel != target:
+                    raise ConfigError("source restore snapshot channel mismatch")
+                self._check_source_vpp(state.amplitude_vpp, field="source restore amplitude")
+                if self.state_guard is not None:
+                    self.state_guard.observe(status)
+                return replace(state, driver_snapshot=status, driver_id=self.descriptor.driver_id,
+                               instrument_idn=identity, restore_evidence={
+                                   "channel": target, "status": "not_started", **profile.as_dict()})
         if self._declares_source_v2_basic_restore():
             source_cfg = self._source_config()
             target_channel = source_cfg.default_channel if channel is None else channel
@@ -10790,6 +10816,43 @@ class SourceService(SessionStateAliasMixin):
         return RestorableSourceState.from_status(self.status(channel=channel))
 
     def restore_restorable_state(self, state: RestorableSourceState) -> SourceStatus:
+        profile = self._native_restore_profile()
+        if profile is not None:
+            from dataclasses import replace
+            from math import isclose
+            self._require("source.restore_state", "source.restore_state", "source.idn")
+            if (not profile.supported or not isinstance(state, RestorableSourceState)
+                    or state.driver_snapshot is None or state.driver_id != self.descriptor.driver_id
+                    or state.channel != state.driver_snapshot.channel):
+                raise ConfigError("source restore requires a matching driver snapshot")
+            target = replace(state.driver_snapshot, output=state.output)
+            self._check_source_vpp(target.amplitude, field="source restore amplitude")
+            with self._source_session() as source:
+                if source.idn() != state.instrument_idn:
+                    raise ConfigError("source identity changed since restore snapshot")
+                if state.restore_evidence is not None:
+                    state.restore_evidence["status"] = "restoring"
+                try:
+                    status = source.restore_basic_state(target)
+                    if status.channel != target.channel:
+                        raise ConfigError("source restore readback channel mismatch")
+                    for name in profile.fields:
+                        actual, expected = getattr(status, name), getattr(target, name)
+                        matches = (isclose(actual, expected, rel_tol=1e-6, abs_tol=1e-6)
+                                   if type(actual) in (float, int) and type(expected) in (float, int)
+                                   else actual == expected)
+                        if not matches:
+                            raise ConfigError(f"source restore readback mismatch: {name}")
+                    self._state_guard_after_write(status)
+                except Exception as exc:
+                    if state.restore_evidence is not None:
+                        state.restore_evidence.update(status="failed", error=error_envelope(exc))
+                    raise
+                if state.restore_evidence is not None:
+                    state.restore_evidence.update(status="verified", observed=status.as_dict())
+                return status
+        if getattr(state, "driver_snapshot", None) is not None:
+            raise ConfigError("source restore capability changed since snapshot")
         if self._declares_source_v2_basic_restore():
             # Basic V2 MAIN phases permit exactly one bounded driver write.
             # Build every request before turning output OFF, then preserve the

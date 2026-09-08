@@ -30,6 +30,7 @@ def test_source_v1_write_inventory_remains_complete_alongside_v2_operation_specs
     inventoried_operations = {item.operation for item in inventory if item.operation is not None}
     assert inventoried_operations <= source_write_operations
     assert source_write_operations - inventoried_operations == {
+        "source.restore_state",  # Independent snapshot-based restore, not a V1 setter route.
         "source.basic_configure_v2",
         "source.basic_live_configure_v2",
         "source.output_enable_v2",

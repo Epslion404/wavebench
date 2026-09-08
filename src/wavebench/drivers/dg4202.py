@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from math import isclose, isfinite
 from threading import RLock
 
@@ -250,6 +250,65 @@ class DG4202Source:
                 "snapshot"
             )
         return snapshot
+
+    # Basic restore implementation synchronized with DG4000 plugin 0.8.0.
+    @staticmethod
+    def _validate_basic_restore_target(snapshot: SourceStatus) -> None:
+        if not isinstance(snapshot, SourceStatus):
+            raise DataError("DG4000 restore requires a SourceStatus snapshot")
+        _validate_channel(snapshot.channel)
+        if (snapshot.function not in _RESTORABLE_BASIC_FUNCTIONS
+                or snapshot.output not in {"ON", "OFF"}
+                or snapshot.amplitude_unit != "VPP"
+                or snapshot.frequency_mode != "FIX" or snapshot.sweep_enabled != "OFF"):
+            raise DataError("DG4000 basic restore requires a basic waveform, VPP, FIX and sweep OFF")
+        for name in ("frequency_hz", "amplitude", "offset_v", "square_duty_cycle_percent"):
+            value = getattr(snapshot, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value):
+                raise DataError(f"DG4000 restore requires finite {name}")
+        if snapshot.frequency_hz <= 0 or snapshot.amplitude < 0 or not 0 < snapshot.square_duty_cycle_percent < 100:
+            raise DataError("DG4000 restore snapshot values are out of range")
+
+    def _require_basic_restore_modes(self, channel: int) -> None:
+        for suffix in ("BURS:STAT", "MOD:STAT", "SWE:STAT"):
+            if _normalize_enum(self.transport.query(f":SOUR{channel}:{suffix}?", replay=ReplayPolicy.NO_REPLAY),
+                               field_name=suffix, aliases={"0": "OFF", "OFF": "OFF", "1": "ON", "ON": "ON"}) != "OFF":
+                raise DataError("DG4000 basic restore requires burst, modulation and sweep OFF")
+
+    def snapshot_basic_state(self, channel: int) -> SourceStatus:
+        """Read a validated baseline without changing output or instrument state."""
+        _validate_channel(channel)
+        with self._io_lock:
+            self._ensure_identity(write=True)
+            self._ensure_configuration_write_allowed()
+            snapshot = self._snapshot_basic_status(channel)
+            self._validate_basic_restore_target(snapshot)
+            self._require_basic_restore_modes(channel)
+            return snapshot
+
+    def restore_basic_state(self, snapshot: SourceStatus) -> SourceStatus:
+        """Restore a validated baseline, including escape from USER; payload is excluded."""
+        self._validate_basic_restore_target(snapshot)
+        with self._io_lock:
+            self._ensure_identity(write=True)
+            self._ensure_configuration_write_allowed()
+            self._require_basic_restore_modes(snapshot.channel)
+            # Verify every configured field while OFF before allowing output ON.
+            try:
+                restored = self._restore_basic_status(replace(snapshot, output="OFF"))
+                self.assert_no_errors()
+                if snapshot.output == "ON":
+                    self._write(f":OUTP{snapshot.channel} ON")
+                    restored = self.get_status(snapshot.channel)
+                    if restored.output != "ON":
+                        raise InstrumentError("DG4000 restored output ON readback mismatch")
+                    self.assert_no_errors()
+                return restored
+            except Exception:
+                self._configuration_writes_blocked = True
+                # No retries or recovery writes on an uncertain session. Parameters
+                # were restored while OFF; a final ON failure remains uncertain.
+                raise
 
     def _restore_basic_status(self, snapshot: SourceStatus) -> SourceStatus:
         channel = snapshot.channel

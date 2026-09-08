@@ -60,6 +60,7 @@ BUILTIN_PLUGINS: tuple[InstrumentPlugin, ...] = (
             "source.output",
             "source.arbitrary_probe",
             "source.arbitrary_upload",
+            "source.restore_state",
         ),
         summary="RIGOL DG4000-series signal source driver for frequency, waveform, output, and ARB flows.",
         idn_patterns=("RIGOL TECHNOLOGIES,DG4",),
