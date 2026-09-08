@@ -9,7 +9,7 @@
 2. 只修改满足需求的最小范围，避免顺手重构。
 3. 为行为变化补充聚焦测试；保持公开 CLI、TUI、报告和发行文案的既有语言约定。
 4. 不把本地配置、真实资源、私有协作路径或内部交接规则写入公开文件。
-5. 不自动推送、打标签、发布版本或覆盖 `wavebench.toml`。
+5. 推送、打标签、发布版本和覆盖 `wavebench.toml` 须有对应授权，不能从代码修改或测试通过推定。
 
 ## 验证分层
 
@@ -25,7 +25,11 @@
 git diff --check
 ```
 
-涉及 run plan 时增加 `run check`；涉及插件时增加包检查、安装 dry-run、插件自身测试和 `plugin doctor --load`；涉及真实仪器时必须增加有边界的验收产物和写后状态回读。
+- 局部行为修改先运行聚焦测试和相关静态检查；跨模块、公共安全合同或合并评估再运行全量测试。
+- 仅修改文档或 Skill 时运行相关文案、链接或 Skill 校验，不自动运行全量 Python 测试；CI 仍执行仓库既有门禁。
+- 修改 plan 示例或校验语义时增加离线 `run check`；仅解释 plan 不自动执行实时步骤。
+- 插件 metadata、打包、安装或发现行为改变时，按受影响合同选择包检查、安装 dry-run 和加载检查；插件生产开发以插件仓 Skill 为主，不能因为涉及插件一词就安装或加载第三方代码。
+- 实际涉及真实仪器写入时，必须保留有边界的验收产物和写后状态回读；fake 测试不需要实机验收。
 
 技能维护增加：
 
@@ -48,12 +52,12 @@ git diff --check
 
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/tech-doc-style-chinese/scripts/lint_copy_rules.py" \
-  .agents/skills/wavebench
+  --term-allowlist docs/tech-doc-term-allowlist.json <changed-markdown-paths>
 ```
 
 ## 交接格式
 
-先给结论，再列：
+先给结论，以下字段只报告与本次任务相关的项目；实际接触硬件时不得省略最终状态和未恢复项：
 
 - 检查或改动的范围；
 - 精确的验证命令和结果；
@@ -67,4 +71,4 @@ python "${CODEX_HOME:-$HOME/.codex}/skills/tech-doc-style-chinese/scripts/lint_c
 
 ## 外部资料
 
-只有用户明确要求最新厂商资料、标准或外部建议时才使用网络搜索。优先官方来源，记录 URL 和访问日期；不发送本地配置、设备序列号、资源地址或实验数据。搜索 MCP 不可用时说明降级路径，不伪造工具结果。
+外部检索的适用条件与隐私边界以 Skill 入口的 `External research` 为准，不在开发流程增加另一套联网门槛。

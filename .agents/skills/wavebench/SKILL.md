@@ -4,9 +4,11 @@ description: >-
   Safely diagnose, configure, test, and extend the WaveBench Python measurement
   bench. Use for WaveBench CLI, run plans, capture packages, reports, TUI,
   instrument discovery, oscilloscope capture, signal-generator control,
-  programmable-power-supply or digital-multimeter measurements, and WaveBench
-  instrument plugins. Do not use for general electronics theory or unrelated
-  VISA/SCPI projects.
+  programmable-power-supply or digital-multimeter measurements, Core development,
+  and runtime plugin management. Production development in the plugin monorepo
+  uses wavebench-plugin-development; add this skill for Core changes or live
+  operations. Do not use for documentation-led work, general electronics theory,
+  or unrelated VISA/SCPI projects.
 license: MIT
 compatibility: >-
   Codex or a compatible Agent Skills host; Python 3.11+; Linux, WSL, and
@@ -26,15 +28,20 @@ metadata:
 
 在不意外改变真实硬件的前提下，完成 WaveBench 的诊断、配置、测量、测试和扩展。优先使用能证明结果的最小操作，先做离线或只读检查，为每次实时写入保留可复核证据。
 
-## Start every task
+## Start within the requested scope
 
 1. 用 `git rev-parse --show-toplevel` 定位仓库根目录，并从根目录工作。
-2. 先读取 `README.md`、`pyproject.toml` 和与任务直接相关的 `docs/project/` 文档。
+2. 初次进入项目时用 `README.md` 定位入口；涉及依赖或版本时读取 `pyproject.toml`，
+   其余只读取当前任务的实现、契约和相关文档，不预加载全部项目说明。
    当前 CLI 事实源依次为实现、`--help`、`run schema`、`run template --list` 和
    `wavebench.example.toml`；技能正文与旧记忆不能覆盖这些事实源。
 3. 执行 `git status --short --branch`，保留无关用户改动；禁止 reset、强制覆盖或隐式清理。
 4. 将任务归类为离线说明/评审、离线代码或配置、实时只读诊断、受控写入或采集。
 5. 在安装依赖、编辑配置或连接硬件前，说明计划、影响范围、预期结果和恢复边界。
+
+解释、诊断和评审默认只读，不自动修复。明确要求实施时，完成已授权修改和相关验证；
+说明计划不是重复确认节点。复合请求按已授权阶段继续，只在关键信息缺失或下一步越界时询问。
+已有实时授权仍需核实当前接线、资源和状态，不能用过去的实验状态代替写前检查。
 
 ## Risk classes
 
@@ -48,7 +55,7 @@ metadata:
 
 ## Non-negotiable safety gates
 
-进行任何 setter、输出切换、采集、扫频或验收脚本前：
+实际连接仪器执行 setter、输出切换、采集、扫频或验收脚本前（离线 fake 测试不适用）：
 
 1. 确认明确的实时写入授权、当前接线和目标资源。
 2. 查询并记录 IDN、相关初始状态、输出状态、保护设置和耦合/负载上下文。
@@ -97,7 +104,7 @@ Reference 只从本入口直接链接，保持一层目录；详细命令和型�
 
 ## Discover actual capabilities
 
-不要仅凭型号或 README 推断能力。先确认已启用的驱动、来源、版本和 capability：
+当任务依赖当前安装或硬件能力时，不要仅凭型号或 README 推断能力；按需确认已启用的驱动、来源、版本和 capability。纯文档或数值代码修改不需要加载插件：
 
 ```bash
 .venv/bin/wavebench plugin list --load
@@ -111,7 +118,7 @@ Reference 只从本入口直接链接，保持一层目录；详细命令和型�
 
 ## Standard workflows
 
-离线或只读预检优先使用：
+按阶段选择预检，不把以下命令作为每个任务的固定清单：
 
 ```bash
 .venv/bin/python -m pip check
@@ -119,17 +126,18 @@ Reference 只从本入口直接链接，保持一层目录；详细命令和型�
 .venv/bin/wavebench run verify --plan plans/<plan>.toml --config wavebench.toml
 ```
 
-真实计划必须遵循 `run check → run verify → run plan → run report`，并同时检查步骤状态、质量门、期望指标、产物和最终设备状态。TUI 界面开发使用 `tui --fake`。
+`pip check` 用于依赖变化或环境诊断；`run check` 是离线检查；`run verify` 会连接仪器，只有已授权实时预检时执行。
+已授权执行的真实计划遵循 `run check → run verify → run plan → run report`，并同时检查步骤状态、质量门、期望指标、产物和最终设备状态。仅检查计划的请求到离线检查结果即完成。TUI 界面开发使用 `tui --fake`。
 
 ## External research
 
-只有用户明确要求厂商资料、标准或最新外部信息时才联网检索。优先官方文档，记录来源和日期，不发送本地配置、序列号、网络地址或实验数据。`tavily_hikari` 等搜索 MCP 为可选能力；不可用时说明限制并使用仓库事实源或已能访问的官方页面，不伪造工具调用。
+仓库实现问题优先使用本地事实源。用户要求外部资料，或关键结论需要核实厂商资料、标准或时效信息时，按宿主联网规则检索；遵守用户明确的离线限制，无法核实时说明缺口。优先官方文档，记录来源和日期，不发送本地配置、序列号、网络地址或实验数据。`tavily_hikari` 等搜索 MCP 为可选能力；不可用时说明限制并使用仓库事实源或已能访问的官方页面，不伪造工具调用。
 
 ## Code, docs, and handoff
 
 代码改动遵循外科手术式修改：先读实现、契约和聚焦测试，再改最小范围并补测试。公开中文 Markdown 使用项目文档规范，保留代码字面量、路径、URL 和配置键的原样格式。
 
-验证强度按风险匹配：
+验证强度按风险匹配，以下是候选命令，不要求每轮全部执行；具体条件见 `development-validation.md`：
 
 ```bash
 .venv/bin/python -m pytest -q tests/<focused-test>.py
@@ -138,4 +146,4 @@ Reference 只从本入口直接链接，保持一层目录；详细命令和型�
 git diff --check
 ```
 
-交接先给结论，再列检查结果、产物路径、最终状态、未恢复设置、剩余能力缺口，以及是否改动跟踪文件、本地配置、虚拟环境或真实仪器。不得用笼统成功描述掩盖跳过、失败、部分产物或恢复错误。
+交接先给结论，再列与任务相关的检查结果和限制；产物路径、最终设备状态、未恢复设置只在实际涉及时报告。不得用笼统成功描述掩盖跳过、失败、部分产物或恢复错误。

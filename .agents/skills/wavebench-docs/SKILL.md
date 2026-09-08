@@ -37,8 +37,9 @@ operation under the `wavebench` safety workflow.
 ## Start from repository facts
 
 1. Work from the Git repository root and inspect `git status --short --branch`.
-2. Read `README.md`, `pyproject.toml`, `CHANGELOG.md`, the relevant documentation
-   indexes, and the pages directly in scope.
+2. Read the pages directly in scope and their navigation entries. Use `README.md`
+   to orient a first visit; read `pyproject.toml` or `CHANGELOG.md` only when the
+   task depends on package or release facts.
 3. Resolve changing claims from implementation, executable help/schema, tests,
    descriptors, and release tags. Existing prose is evidence to audit, not proof
    of current behavior.
@@ -52,6 +53,12 @@ page contracts, sources of truth, Core/plugin ownership, README scope, status,
 lifecycle, or user journeys. This is the single normative source for those rules.
 
 ## Choose one mode
+
+A request to explain, diagnose, audit, or review does not by itself authorize
+edits. When the user also requests implementation, finish the authorized edits
+and relevant checks after any stated prerequisite is satisfied. Mode selection
+is a workflow choice, not an extra approval step. Ask only for material missing
+information or work outside the existing authorization.
 
 | Mode | Use when | Load |
 | --- | --- | --- |
