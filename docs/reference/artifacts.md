@@ -138,3 +138,15 @@ recovered, expect_status, expect_failures, expect_fft_status, expect_fft_failure
 - [从模板到报告](../tutorials/from-template-to-report.md)
 - [run plan 排错](../how-to/troubleshooting.md)
 - [run plan Reference](run-schema.md)
+
+## 高级谱质量、批次与双通道产物
+
+`spectral_quality` 的 stage measurement 使用 `wavebench.spectral_quality.v1`，记录完整参数、PSD 条件、定义、频率间隔、各区间的 bin 范围／数量／带宽／V²，以及每阶谐波覆盖状态和最大杂散位置。JSON 标量只保存有限数或 `null`，缺失值沿用 unavailable 验收。
+
+批次目录中的 `batch.json` 使用 `wavebench.analysis_batch.v1`，保存 binding、binding_sha256、逐项状态、指标、错误及 attempts 文件摘要；`summary.csv` 列为 `id,status,metrics_json,directory,error_code`。结果位于 `items/<id>/attempt_<number>/`，复用独立分析文件。`.batch.lock` 是进程互斥文件。已完成结果恢复前验证内容，未完成 attempt 保留在原位置并计入后续总预算。
+
+双通道 manifest 使用 `wavebench.analysis_pair.v1`，外层仍复用 `analysis_pipeline` artifact 键，以共用 run 汇总、expectation 和 R3 监督。独立 `analysis.json` 标记 `analysis_kind="pair"`。来源记录 reference／response 两路 SHA-256、metadata SHA-256、同步证据及时间轴检查；stage measurement 分别使用 `wavebench.pair_delay.v1` 和 `wavebench.pair_transfer.v1`。
+
+双通道频域 NPY／CSV 的列固定为 `frequency_hz,real_v,imaginary_v,gain_db,phase_rad,coherence,valid,coherent`。real_v／imaginary_v 为 H1 的实部／虚部，实际单位是 V/V；gain_db 为 20 log10 幅值，phase_rad 为弧度。频率始终有效；无效响应的五个数值列在 NPY 中为 NaN，CSV 中为空，valid／coherent 为 0／1。这个独立合同不改变单通道导出禁止非有限值的规则。JSON 指标继续使用 null。
+
+报告将双通道增益、相位、相干性分图展示，保留无效区断点，并显示有效／高相干 bin 数、延迟指标及 synthetic 证据类型。当前曲线渲染读取 NPY；仅导出 CSV 时显示数据链接，不伪造图形。显示抽稀仍不参与测量或验收。

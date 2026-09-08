@@ -4,6 +4,66 @@
 
 `analysis` 命令直接处理历史 capture package，不需要仪器配置。显式选择一个通道，配方包含 `schema = "wavebench.analysis_recipe.v1"`、`operations` 和可选 `[expect]`／`[resources]`，共用下文的算子与验收合同。示例为 `plans/example_analysis_recipe.toml`。
 
+## 高级谱质量估计
+
+本节及下文批量／双通道接口为开发分支已实现、尚未发布的合同。`spectral_quality` 只接受 mean Welch PSD，沿用命名指标与 `[expect]`。完整配方见 `plans/example_spectral_quality.toml`；每个字段均显式声明。
+
+| 字段 | 合同 |
+| --- | --- |
+| `name`、`metrics` | 安全名称；显式选择下文指标，不重复 |
+| `band_hz` | 总测量闭区间，必须在 Nyquist 内 |
+| `dc_exclude_hz`、`exclude_hz` | DC 排除区从 0 开始；其它排除区最多 32 个，位于总频带内 |
+| `fundamental` | 仅 `{frequency_hz=...}` 或 `{search_hz=[low,high]}`；搜索模式在带内合格峰中选择最大密度峰，不插值 |
+| `fundamental_half_width_hz`、`harmonic_half_width_hz` | 正的积分半宽，不小于实际 bin 间隔；不自动推断主瓣 |
+| `harmonic_orders` | 显式选择 2～16 阶，最多 15 项且不重复；可为空 |
+| `min_fundamental_v2` | 正的基波积分功率门 |
+| `min_peak_density_v2_per_hz`、`min_prominence_v2_per_hz` | 正的基波峰密度及显著性门，固定频率也必须通过 |
+| `min_noise_bins` | 至少 1 个有效噪声 bin，最大 1000000 |
+| `spur_search_hz` | 总频带内的杂散搜索区，排除 DC、无效区及基波区，包含谐波 |
+| `spur_half_width_hz`、`spur_distance_hz` | 正的杂散积分半宽和候选最小间距 |
+| `spur_min_density_v2_per_hz`、`spur_min_prominence_v2_per_hz` | 正的杂散候选密度／显著性门 |
+
+按闭区间 bin 中心分配区域，`P(S)=sum(PSD[S])*df`。基波、谐波和剩余噪声区分别为 F、H、N；区域冲突或基波窗口被截断时失败。超出测量带界的谐波记录未覆盖；其结果只说明声明的带内估计。固定基频使用最近 bin 检查峰门，积分区域仍围绕声明频率。
+
+- `snr_db = 10*log10(P(F)/P(N))`。
+- `sinad_db = 10*log10(P(F)/(P(H)+P(N)))`。
+- `thdn_ratio = sqrt((P(H)+P(N))/P(F))`，不覆盖旧 `thd_ratio`。
+- `sfdr_db = 10*log10(P(F)/P(spur))`，spur 为最大积分杂散区；相应 `spur_dbc` 为反号。
+
+可选指标还包括 `fundamental_frequency_hz`、`fundamental_power_v2`、`harmonic_power_v2`、`noise_power_v2`、`noise_bandwidth_hz`、`spur_frequency_hz`、`spur_power_v2`。输出键为 `<name>_<metric>`。有效信号不足、零分母或有效噪声 bin 太少时对应结果为 `null`，不加 epsilon；杂散窗口裁断、重叠或间距不足时 SFDR 不可用，不静默合并谱簇。谱峰端点沿用 SciPy `find_peaks` 的排除规则。
+
+这些是带宽受限的 PSD 积分估计：基波区内噪声不扣除，剩余噪声区可能含非谐波杂散，不承诺等价于仪器标准自动 SNR。报告展示实际区域、积分功率及最大杂散位置。旧 FFT 幅值、每 bin 噪声底和 H2～H5 保持原算法。
+
+## 串行批量分析
+
+`analysis batch --manifest batch.toml --output <new-directory>` 读取 `wavebench.analysis_batch.v1` 清单。字段为 `recipe`、`entries`、`on_failure="stop|continue"`、`duplicates="reject|allow"`、`max_output_bytes`；路径相对于清单目录解析。每个 entry 必须有唯一安全 `id`、`capture` 和正整数 `channel`。同包同通道重复仅在 `allow` 时接受；条目最多 256 个，并受环境文件数上限约束。
+
+批次默认启用 R3 监督，每条分析的默认超时为 300 秒；可用 `--analysis-execution` 显式替换。一次只执行一个条目，取消停止整个批次，普通失败遵循清单的 stop／continue。`max_output_bytes` 不得超过环境总输出限额，历史 attempt、当前结果和索引都计入总额；索引预留空间可能使小配额提前耗尽。失败诊断可尽力超额保存，但批次状态为失败。
+
+`--resume` 要求原批次目录，重新核对清单、配方、有效资源／执行配置、数值库版本、来源 metadata／NPY 摘要和已完成产物摘要。变化或损坏时拒绝复用，要求新的输出目录；未成功的条目写入新的 attempt 目录，保留旧文件。文件锁防止两个进程同时写同一批次。中断期间尚未完成的 attempt 不冒充已验证成功结果。
+
+批次 JSON／CSV 逐项列出指标、状态、错误和目录，不自动对不同合同或频带的指标求平均。`analysis report <batch-directory> --output report.html` 可以复用已保存的曲线，仍受报告资源预算约束。
+
+## 双通道分析
+
+独立入口为 `analysis pair-check/pair-run --capture <package> --recipe <recipe>`，`pair-run` 另需新的 `--output`。配方 schema 为 `wavebench.analysis_pair_recipe.v1`，包含 `reference_channel`、`response_channel`、`operations` 和可选 `expect`／`resources`。资源与执行配置选项同单通道接口。示例见 `plans/example_pair_analysis.toml`。
+
+RunPlan 使用独立的 `analysis.pair`，同样要求 `source={step="earlier_capture"}` 指向更早且显式保存 NPY 的 `scope.capture`。它与 `analysis.pipeline` 共同组成离线后缀，不支持 safety_gate，在硬件恢复、会话关闭与租约释放后执行。当前真实采集不会生成足够的同步证据，因此该入口只完成 Core 离线集成与 synthetic 测试；真实插件适配与实机验收尚未完成。
+
+同包两路必须不同且指向不同 NPY。metadata 的 `synchronization` 必须使用 `wavebench.capture_sync.v1`，当前仅接受 `kind="synthetic"`、`status="verified"`。还要求 `producer.name`／`producer.version`、来源为 synthetic 的 `acquisition_group.id`、`timebase_id`、`record_id`、`single_record`／`frozen_read` 保证，以及每路 time_start_s、sample_interval_s、samples、skew_s、uncertainty_s。示例生成器给出完整结构。普通 metadata 和 SHA-256 用于一致性追溯，并非防伪签名。
+
+两路点数一致、各自等间隔，并逐块检查时间轴绝对差不超过 `dt*1e-6`；不使用绝对时间戳的相对容差放宽偏移。不自动裁剪、补零、重采样或 deskew；skew 信息仅记录，不应用补偿。旧包缺证据仍可单通道分析，不能通过同目录、同时间轴或主机 ID 推断同步。
+
+| 算子 | 显式字段与约束 |
+| --- | --- |
+| `delay` | `name`、`max_lag_s>=0`、布尔 `remove_mean`、`polarity="same|either"`、`min_overlap_ratio`、`min_correlation` 在 (0,1]、`ambiguity_delta` 在 [0,1)、`metrics`；至多一次且在 transfer 前 |
+| `transfer` | `name`、三种周期 `window`、`nperseg`、`noverlap`、`nfft`、`detrend="none|constant|linear"`、正的 `min_reference_density`／`min_response_density`、`min_coherence` 在 [0,1]、布尔 `unwrap_phase`、`metrics`；至多一次 |
+| `export` | 安全 `name`、不重复的 `formats=["npy","csv"]`；必须在 transfer 后，导出名不重复 |
+
+时延为整数采样：`response_delay_s>0` 表示 response 较晚，去均值对整条记录显式应用，归一化能量只使用当前 lag 的实际重叠。超出记录的搜索范围按实际可重叠样本限制；能量为零、相关门不通过或最高两个 lag 分数差不超过歧义门时不可用。允许反相时按绝对相关值排序并单独报告极性。指标为 `response_delay_samples`、`response_delay_s`、`correlation`、`polarity`、`overlap_samples`，均加测量名称前缀。它描述测量链路总延迟，不是已校准 DUT 延迟。
+
+transfer 至少需要两个完整 Welch 段，固定 mean，并共用两路分段谱：`Sxy=mean(conj(X)*Y)`、`H1=Sxy/Sxx`、`coherence=abs(Sxy)^2/(Sxx*Syy)`。弱参考／响应密度处掩码无效；相干性在 1 附近不超过 `1e-9` 的舍入误差可裁剪，明显越界失败。低相干估计保留并以 coherent 掩码区分；相位展开只在连续有效区进行。指标为 `mean_coherence`、`min_coherence`、`valid_bin_count`、`coherent_bin_count`，显式选择并加名称前缀。
+
 ## 分析进程监督
 
 本节为开发分支已实现、尚未发布的执行合同。`analysis check/run` 与 `run check/intent/verify/plan` 接受 `--analysis-execution <toml>`，文件使用 `wavebench.analysis_execution.v1`。示例见 `plans/example_analysis_execution.toml`。

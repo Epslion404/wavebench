@@ -115,3 +115,18 @@ off_power_channels = [1]
 公开计划应使用保留地址、占位符和相对路径；不要把真实 IP、序列号、串口路径或 `data/` 下的实验产物写进仓库。
 
 资源与执行环境配置可组合使用：`example_analysis_resources.toml` 设置预算，`example_analysis_execution.toml` 启用独立分析进程、超时和可选硬内存限制。两者都不是 RunPlan，不放入 `--plan`。
+
+## 无硬件的高级指标、批量与双通道示例
+
+`generate_pair_example.py` 只生成明确标记为 synthetic 的两路随机信号，以及单音加谐波／噪声的单通道包。输出目录必须不存在；双通道 response 为两倍增益、延迟 7 个采样点。示例不连接仪器。
+
+```bash
+python plans/generate_pair_example.py /tmp/wavebench-demo
+python -m wavebench analysis run --capture /tmp/wavebench-demo/tone --channel 1 --recipe plans/example_spectral_quality.toml --output /tmp/wavebench-quality
+python -m wavebench analysis batch --manifest /tmp/wavebench-demo/batch.toml --output /tmp/wavebench-batch
+python -m wavebench analysis batch --manifest /tmp/wavebench-demo/batch.toml --output /tmp/wavebench-batch --resume
+python -m wavebench analysis pair-run --capture /tmp/wavebench-demo --recipe plans/example_pair_analysis.toml --output /tmp/wavebench-pair --analysis-execution plans/example_analysis_execution.toml
+python -m wavebench analysis report /tmp/wavebench-pair --output /tmp/wavebench-pair.html
+```
+
+Windows 可将 `/tmp/...` 替换为本地新目录。高级指标窗口按示例的 16384 Hz 采样率设计；换用历史包前需要按实际采样率和频率分辨率修改窗口及频带。缺少同步证据的真实旧包不适用于双通道示例，可用于单通道及批量流程验证。
