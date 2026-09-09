@@ -37,6 +37,7 @@ from wavebench.data.pipeline_operations import measure_band, detect_peaks, smoot
 from wavebench.services.run_analysis import evaluate_expect
 from wavebench.services.run_artifacts import RunStepRecord
 from wavebench.services.run_plan import RunPlan, RunStep
+from wavebench.services.platform_io import _replace_file
 
 
 ANALYSIS_PIPELINE_SCHEMA = "wavebench.analysis_pipeline.v1"
@@ -765,7 +766,7 @@ def _atomic_write_npy(path: Path, data: np.ndarray | None, *, blocks=None, shape
                 file.write(encoded)
             file.flush()
             os.fsync(file.fileno())
-        os.replace(temporary, path)
+        _replace_file(temporary, path)
         if budget:
             budget.committed_file(path.stat().st_size)
     finally:
@@ -796,7 +797,7 @@ def _atomic_write_csv(path: Path, columns: list[str], data: np.ndarray | None, *
                 budget.pending_file(file.tell())
             file.flush()
             os.fsync(file.fileno())
-        os.replace(temporary, path)
+        _replace_file(temporary, path)
         if budget:
             budget.committed_file(path.stat().st_size)
     finally:
@@ -812,7 +813,7 @@ def _atomic_write_bytes(path: Path, data: bytes, *, budget: AnalysisBudget | Non
             file.write(data)
             file.flush()
             os.fsync(file.fileno())
-        os.replace(temporary, path)
+        _replace_file(temporary, path)
         if budget:
             budget.committed_file(len(data))
     finally:
