@@ -121,4 +121,4 @@ WaveBench 使用 MIT 许可证。
 
 <img src="https://www.krill-code.com/brand/logo-horizontal.png" alt="Krill" width="150" />
 
-感谢 [Krill中转站](https://www.krill-code.com/) 对本项目的赞助。
+感谢 [Krill AI](https://www.krill-code.com/) 对本项目的赞助。
