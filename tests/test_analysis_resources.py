@@ -3,6 +3,7 @@ from dataclasses import replace
 from hashlib import sha256
 import io
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -15,7 +16,7 @@ from wavebench.data.signal_pipeline import TimeSignal, validate_waveform
 from wavebench.errors import ConfigError, DataError, ExecutionIntentError, error_envelope
 from wavebench.services.analysis_service import run_analysis, check_analysis
 from wavebench.services.execution_intent import build_execution_intent, verify_execution_intent
-from wavebench.services.run_pipeline import _atomic_write_csv, _export_signal
+from wavebench.services.run_pipeline import _atomic_write_csv, _atomic_write_npy, _atomic_write_bytes, _export_signal
 from wavebench.report.analysis import read_curve, write_analysis_report
 from test_analysis_service import analysis_input as analysis_input
 from test_psd_pipeline import PARAMS, plan_for, EXPORT
@@ -147,9 +148,61 @@ def test_write_limit_and_io_failure_cleanup(tmp_path):
         _atomic_write_csv(path, ["x", "y"], np.ones((100, 2)),
                           budget=AnalysisBudget(replace(AnalysisLimits(), max_output_bytes=10)))
     assert path.read_text() == "keep original"
-    with patch("wavebench.services.run_pipeline.os.replace", side_effect=OSError("disk full")):
+    with patch("wavebench.services.run_pipeline._replace_file", side_effect=OSError("disk full")):
         with pytest.raises(OSError):
             _atomic_write_csv(path, ["x", "y"], np.ones((2, 2)))
+    assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize("kind", ["bytes", "npy", "csv"])
+@pytest.mark.parametrize("persistent", [False, True])
+def test_analysis_windows_replace_contention(tmp_path, monkeypatch, kind, persistent):
+    from unittest.mock import Mock
+    from wavebench.services import platform_io
+
+    path = tmp_path / "result"
+    path.write_bytes(b"keep original")
+    real_replace = platform_io.os.replace
+    attempts = []
+
+    def move(source, target, flags):
+        attempts.append((source, target))
+        assert path.read_bytes() == b"keep original"
+        if persistent or len(attempts) == 1:
+            return 0
+        real_replace(source, target)
+        return 1
+
+    kernel32 = SimpleNamespace(MoveFileExW=Mock(side_effect=move))
+    monkeypatch.setattr(platform_io, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(platform_io.ctypes, "WinDLL", lambda *a, **kw: kernel32, raising=False)
+    monkeypatch.setattr(platform_io.ctypes, "get_last_error", lambda: 32, raising=False)
+    sleep = Mock()
+    monkeypatch.setattr(platform_io.time, "sleep", sleep)
+    budget = AnalysisBudget(AnalysisLimits())
+
+    def write():
+        if kind == "bytes":
+            _atomic_write_bytes(path, b"new contents", budget=budget)
+        elif kind == "npy":
+            _atomic_write_npy(path, np.ones((2, 2)), budget=budget)
+        else:
+            _atomic_write_csv(path, ["x", "y"], np.ones((2, 2)), budget=budget)
+
+    if persistent:
+        with pytest.raises(OSError, match="MoveFileExW failed"):
+            write()
+        assert path.read_bytes() == b"keep original"
+        assert budget.output_files == budget.output_bytes == 0
+        assert len(attempts) == 3
+    else:
+        write()
+        assert path.read_bytes() != b"keep original"
+        assert budget.output_files == 1
+        assert budget.output_bytes == path.stat().st_size
+        assert len(attempts) == 2
+    assert sleep.call_count == len(attempts) - 1
+    assert len(set(attempts)) == 1
     assert list(tmp_path.iterdir()) == [path]
 
 
