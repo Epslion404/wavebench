@@ -5,12 +5,24 @@ from pathlib import Path
 from typing import Any
 
 from wavebench.config import load_config
-from wavebench.data.expectations import evaluate_waveform_expectation, expectation_summary
+from wavebench.data.expectations import (
+    evaluate_waveform_expectation,
+    expectation_summary,
+    validate_expectation,
+)
 from wavebench.data.relationships import analyze_waveform_relationships
 from wavebench.errors import ConfigError, WaveBenchError
 from wavebench.instruments.models import WaveformData
 from wavebench.logging import CommandLogger
 from wavebench.services.scope_service import ScopeService
+
+# 读取波形可能造成的仪器状态影响。读取前不恢复原采集状态，调用方必须先确认。
+_WAVEFORM_STATE_EFFECTS = [
+    "a running acquisition may be stopped",
+    "waveform transfer source/mode/format/points may be changed",
+    "some drivers may enable the requested analog channel display before fetching",
+    "the previous acquisition run state is not restored",
+]
 
 
 def scope_observe_payload(
@@ -18,19 +30,78 @@ def scope_observe_payload(
     config_path: str | Path,
     channel: int | None = None,
     channels: tuple[int, ...] | None = None,
-    fetch_waveform: bool = False,
+    allow_50ohm: bool = False,
+    resource: str | None = None,
+) -> dict[str, Any]:
+    """严格只读的示波器观察：IDN、每通道快照和高阻安全判断。
+
+    该函数不读取波形，也不发送任何会改变仪器状态的命令，因此可以安全地通过 MCP 暴露。
+    需要波形、期望值检查或多通道关系时，请使用 ``scope_waveform_report_payload``
+    （对应显式 CLI 命令 ``wavebench scope observe --fetch-waveform``）。
+    """
+    return _build_observation(
+        config_path=config_path,
+        channel=channel,
+        channels=channels,
+        allow_50ohm=allow_50ohm,
+        resource=resource,
+        fetch_waveform=False,
+        expectations=None,
+    )
+
+
+def scope_waveform_report_payload(
+    *,
+    config_path: str | Path,
+    channel: int | None = None,
+    channels: tuple[int, ...] | None = None,
     allow_50ohm: bool = False,
     expectations: dict[int, dict[str, Any]] | None = None,
+    resource: str | None = None,
+) -> dict[str, Any]:
+    """显式读取波形并给出摘要、期望值检查和多通道关系。
+
+    读取波形属于写操作：可能停止正在运行的采集、修改波形传输参数并打开通道显示。
+    所有输入（通道、期望值）都在任何仪器 I/O 之前完成校验，非法输入不会产生任何仪器写入。
+    """
+    normalized_expectations = _normalize_expectations(expectations)
+    return _build_observation(
+        config_path=config_path,
+        channel=channel,
+        channels=channels,
+        allow_50ohm=allow_50ohm,
+        resource=resource,
+        fetch_waveform=True,
+        expectations=normalized_expectations,
+    )
+
+
+def _build_observation(
+    *,
+    config_path: str | Path,
+    channel: int | None,
+    channels: tuple[int, ...] | None,
+    allow_50ohm: bool,
+    resource: str | None,
+    fetch_waveform: bool,
+    expectations: dict[int, dict[str, Any]] | None,
 ) -> dict[str, Any]:
     config = load_config(config_path)
+    if resource:
+        config = config.with_resource(resource)
     observed_channels = _scope_channels(
         channel=channel,
         channels=channels,
         default_channel=config.scope.default_channel,
     )
-    normalized_expectations = _normalize_expectations(expectations)
-    if normalized_expectations and not fetch_waveform:
-        raise ConfigError("scope.observe expectations require fetch_waveform=true")
+    unknown_expectation_channels = sorted(
+        item for item in (expectations or {}) if item not in observed_channels
+    )
+    if unknown_expectation_channels:
+        raise ConfigError(
+            "scope observe expectation channels must be observed channels: "
+            f"{', '.join(str(item) for item in unknown_expectation_channels)}"
+        )
     service = ScopeService(config=config, logger=CommandLogger())
     sections: dict[str, Any] = {}
     warnings: list[str] = []
@@ -46,7 +117,7 @@ def scope_observe_payload(
             allow_50ohm=allow_50ohm,
             warnings=warnings,
             fetched_waveforms=fetched_waveforms,
-            expectations=normalized_expectations,
+            expectations=expectations or {},
             expectation_results=expectation_results,
         )
         for observed_channel in observed_channels
@@ -54,15 +125,14 @@ def scope_observe_payload(
     first_channel = channel_sections[0]
     sections["scope_status"] = first_channel["scope_status"]
     sections["coupling"] = first_channel["coupling"]
-    sections["waveform"] = first_channel["waveform"]
 
-    return {
+    payload: dict[str, Any] = {
         "status": "ok" if not warnings else "partial",
         "read_only": not fetch_waveform,
         "query_only": not fetch_waveform,
         "mutates_instrument": fetch_waveform,
         "raw_scpi": False,
-        "instrument_state_effects": _instrument_state_effects(fetch_waveform),
+        "instrument_state_effects": list(_WAVEFORM_STATE_EFFECTS) if fetch_waveform else [],
         "config": {
             "path": str(config.source_path),
             "scope_driver": config.scope.driver,
@@ -80,21 +150,29 @@ def scope_observe_payload(
         },
         **sections,
         "channels": channel_sections,
-        "relationships": (
+        "warnings": warnings,
+    }
+    if fetch_waveform:
+        # 每个通道各自打开 session，波形不保证来自同一次 acquisition；跨采集的时序关系不成立。
+        payload["waveform_source"] = {
+            "same_acquisition": False,
+            "reason": "channels are fetched channel-by-channel, not in one acquisition",
+        }
+        payload["relationships"] = (
             analyze_waveform_relationships(fetched_waveforms, same_acquisition=False)
             if len(fetched_waveforms) >= 2
             else []
-        ),
-        "expectations": expectation_summary(expectation_results),
-        "warnings": warnings,
-        "agent_hints": _agent_hints(
-            sections,
-            warnings,
-            channel_sections=channel_sections,
-            fetched_waveforms=fetched_waveforms,
-            expectation_results=expectation_results,
-        ),
-    }
+        )
+        payload["expectations"] = expectation_summary(expectation_results)
+    payload["agent_hints"] = _agent_hints(
+        sections,
+        warnings,
+        channel_sections=channel_sections,
+        fetched_waveforms=fetched_waveforms,
+        expectation_results=expectation_results,
+        fetch_waveform=fetch_waveform,
+    )
+    return payload
 
 
 def _scope_channels(
@@ -104,15 +182,15 @@ def _scope_channels(
     default_channel: int,
 ) -> tuple[int, ...]:
     if channel is not None and channels is not None:
-        raise ConfigError("scope.observe accepts either channel or channels, not both")
+        raise ConfigError("scope observe accepts either channel or channels, not both")
     candidates = channels if channels is not None else (default_channel if channel is None else channel,)
     if not candidates:
-        raise ConfigError("scope.observe channels must not be empty")
+        raise ConfigError("scope observe channels must not be empty")
     for candidate in candidates:
         if isinstance(candidate, bool) or not isinstance(candidate, int) or candidate < 1:
-            raise ConfigError("scope.observe channel must be a positive integer")
+            raise ConfigError("scope observe channel must be a positive integer")
     if len(set(candidates)) != len(candidates):
-        raise ConfigError("scope.observe channels must be unique")
+        raise ConfigError("scope observe channels must be unique")
     return candidates
 
 
@@ -124,20 +202,9 @@ def _normalize_expectations(
     normalized: dict[int, dict[str, Any]] = {}
     for channel, expectation in expectations.items():
         if isinstance(channel, bool) or not isinstance(channel, int) or channel < 1:
-            raise ConfigError("scope.observe expectation channel must be a positive integer")
-        if not isinstance(expectation, dict):
-            raise ConfigError("scope.observe expectation entries must be objects")
-        normalized[channel] = dict(expectation)
+            raise ConfigError("scope observe expectation channel must be a positive integer")
+        normalized[channel] = validate_expectation(expectation)
     return normalized
-
-
-def _instrument_state_effects(fetch_waveform: bool) -> list[str]:
-    if not fetch_waveform:
-        return []
-    return [
-        "waveform transfer source/mode/format may be changed",
-        "some drivers may enable the requested analog channel display before fetching",
-    ]
 
 
 def _observe_channel(
@@ -151,7 +218,7 @@ def _observe_channel(
     expectations: dict[int, dict[str, Any]],
     expectation_results: dict[int, dict[str, Any]],
 ) -> dict[str, Any]:
-    section = {
+    section: dict[str, Any] = {
         "channel": channel,
         "scope_status": _attempt(
             lambda: asdict(service.status(channel=channel)),
@@ -164,42 +231,36 @@ def _observe_channel(
             name=f"ch{channel}_coupling",
         ),
     }
-    if fetch_waveform:
-        section["waveform"] = _attempt(
-            lambda: _waveform_payload(
-                service,
-                channel,
-                allow_50ohm=allow_50ohm,
-                fetched_waveforms=fetched_waveforms,
+    if not fetch_waveform:
+        return section
+    section["waveform"] = _attempt(
+        lambda: _waveform_payload(
+            service,
+            channel,
+            allow_50ohm=allow_50ohm,
+            fetched_waveforms=fetched_waveforms,
+        ),
+        warnings=warnings,
+        name=f"ch{channel}_waveform",
+    )
+    if channel in expectations and channel in fetched_waveforms:
+        result = _attempt(
+            lambda: evaluate_waveform_expectation(
+                fetched_waveforms[channel],
+                expectations[channel],
             ),
             warnings=warnings,
-            name=f"ch{channel}_waveform",
+            name=f"ch{channel}_expectation",
         )
-    else:
-        section["waveform"] = {
-            "status": "skipped",
-            "reason": "fetch_waveform=false",
-        }
-    if channel in expectations and channel in fetched_waveforms:
-        result = evaluate_waveform_expectation(
-            fetched_waveforms[channel],
-            expectations[channel],
-        )
-        expectation_results[channel] = result
-        section["expectation"] = {
-            "status": "ok",
-            "data": result,
-        }
+        section["expectation"] = result
+        if result["status"] == "ok":
+            expectation_results[channel] = result["data"]
     elif channel in expectations:
         section["expectation"] = {
             "status": "unavailable",
             "reason": "waveform unavailable",
         }
-    else:
-        section["expectation"] = {
-            "status": "skipped",
-            "reason": "no expectation for channel",
-        }
+        warnings.append(f"ch{channel}_expectation_unavailable: waveform unavailable")
     return section
 
 
@@ -261,8 +322,14 @@ def _agent_hints(
     channel_sections: list[dict[str, Any]],
     fetched_waveforms: dict[int, WaveformData],
     expectation_results: dict[int, dict[str, Any]],
+    fetch_waveform: bool,
 ) -> list[str]:
     hints: list[str] = []
+    if not fetch_waveform:
+        hints.append(
+            "read-only observation: waveforms were not read; use `wavebench scope observe --fetch-waveform` "
+            "when waveform summaries, expectations or multi-channel relationships are required"
+        )
     for channel_section in channel_sections:
         waveform = channel_section.get("waveform", {})
         if waveform.get("status") != "ok":
@@ -275,37 +342,41 @@ def _agent_hints(
         if isinstance(cycles, (int, float)) and cycles < 5:
             hints.append(f"CH{channel}: consider capturing a wider time window for robust periodic analysis")
     if len(fetched_waveforms) >= 2:
-        summaries = [waveform.summary() for waveform in fetched_waveforms.values()]
-        frequencies = [
-            summary.get("frequency_estimate_hz")
-            for summary in summaries
-            if isinstance(summary.get("frequency_estimate_hz"), (int, float))
-            and not any(str(item).startswith("low_cycle_count") for item in summary.get("quality_warnings", []))
-        ]
+        hints.append(
+            "waveforms were read channel-by-channel, so they are not from one acquisition; "
+            "timing relationships (phase/correlation/intersections) were skipped. "
+            "Use `wavebench scope capture --channel ... --synchronized` for driver-proven single-acquisition capture"
+        )
+        frequencies = _trusted_frequencies(fetched_waveforms)
         if len(frequencies) >= 2 and min(frequencies) > 0 and max(frequencies) / min(frequencies) > 10:
             hints.append(
                 "multi_channel_frequency_span_large: use separate time windows/profiles before judging waveform shape across channels"
             )
-    expected_frequencies = [
-        expectation.get("checks", [])
-        for expectation in expectation_results.values()
-    ]
-    frequency_values: list[float] = []
-    for checks in expected_frequencies:
-        for check in checks:
-            if check.get("metric") == "frequency_hz" and isinstance(check.get("expected"), (int, float)):
-                frequency_values.append(float(check["expected"]))
-    if len(frequency_values) >= 2 and min(frequency_values) > 0 and max(frequency_values) / min(frequency_values) > 10:
-        hints.append(
-            "expected_multi_channel_frequency_span_large: expectation frequencies span more than 10x; use separate acquisition windows for shape judgments"
-        )
     for channel, result in sorted(expectation_results.items()):
         if result["status"] in {"warn", "fail"}:
             hints.append(f"CH{channel}_expectation_{result['status']}: inspect expectation checks")
+        elif result["status"] == "skipped":
+            hints.append(f"CH{channel}_expectation_skipped: expectation contains no checkable metric")
     if sections.get("scope_status", {}).get("status") == "unavailable":
-        hints.append("driver lacks scope.snapshot or the status query failed; use identity/waveform sections cautiously")
+        hints.append("driver lacks scope.snapshot or the status query failed; use identity cautiously")
     if sections.get("coupling", {}).get("status") == "unavailable":
         hints.append("do not run capture until input coupling safety is confirmed")
     if warnings:
         hints.append("treat this observation as partial and avoid state-changing actions")
     return hints
+
+
+def _trusted_frequencies(waveforms: dict[int, WaveformData]) -> list[float]:
+    frequencies: list[float] = []
+    for waveform in waveforms.values():
+        summary = waveform.summary()
+        value = summary.get("frequency_estimate_hz")
+        if not isinstance(value, (int, float)) or value <= 0:
+            continue
+        if any(
+            str(item).startswith("low_cycle_count")
+            for item in summary.get("quality_warnings", []) or []
+        ):
+            continue
+        frequencies.append(float(value))
+    return frequencies

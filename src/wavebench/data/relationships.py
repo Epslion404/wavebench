@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from itertools import combinations
 from typing import Any
 
@@ -40,15 +41,29 @@ def analyze_waveform_pair(
     left_summary = left.summary()
     right_summary = right.summary()
     warnings: list[str] = []
-    common = _common_time_axis(left, right, max_points=max_correlation_points)
-    correlation = _correlation_payload(common, warnings=warnings)
-    intersections = _intersection_payload(
-        common,
-        warnings=warnings,
-        max_intersections=max_intersections,
-    )
-    if not same_acquisition:
-        warnings.append("not_same_acquisition_timing_relationships_are_advisory")
+    if same_acquisition:
+        common = _common_time_axis(left, right, max_points=max_correlation_points)
+        correlation = _correlation_payload(common, warnings=warnings)
+        intersections = _intersection_payload(
+            common,
+            warnings=warnings,
+            max_intersections=max_intersections,
+        )
+        common_time = {**common["metadata"], "same_acquisition": True}
+    else:
+        # 跨 acquisition 的两个通道没有共同时间基准：相关性、交点、相位、延迟都不成立，
+        # 只看同步无关的频率比和幅度/均值关系。
+        warnings.append("not_same_acquisition_timing_relationships_skipped")
+        correlation = _skipped_analysis("not_same_acquisition")
+        intersections = _skipped_analysis("not_same_acquisition")
+        common_time = {
+            "overlap": None,
+            "x_start_s": None,
+            "x_stop_s": None,
+            "duration_s": None,
+            "samples": 0,
+            "same_acquisition": False,
+        }
     left_frequency = _trusted_frequency(left_summary, warnings=warnings, label=f"CH{left.channel}")
     right_frequency = _trusted_frequency(right_summary, warnings=warnings, label=f"CH{right.channel}")
     frequency_ratio = None
@@ -58,22 +73,23 @@ def analyze_waveform_pair(
         upper = max(left_frequency, right_frequency)
         if lower > 0:
             frequency_ratio = float(upper / lower)
-        if (
-            same_acquisition
-            and
-            correlation.get("lag_at_max_correlation_s") is not None
-            and abs(left_frequency - right_frequency) / max(left_frequency, right_frequency) <= 0.01
+        if not same_acquisition:
+            pass
+        elif (
+            abs(left_frequency - right_frequency) / max(left_frequency, right_frequency) <= 0.01
+            and common_time.get("overlap") is True
         ):
-            phase_degrees = float(
-                (correlation["lag_at_max_correlation_s"] * left_frequency * 360.0) % 360.0
-            )
+            # 约定：phase_degrees_at_left_frequency 表示 right 相对 left 的相位滞后，取值 [0, 360)。
+            # 用基波频域相位差而不是相关峰 lag：后者对截断窗口和幅度不对称有系统偏差，
+            # 且直接反相（right = -left）会被绝对值最大化吃掉 180°。
+            phase_degrees = _fundamental_phase_degrees(common, frequency_hz=left_frequency)
         elif frequency_ratio is not None and abs(frequency_ratio - 1.0) > 0.01:
             warnings.append("phase_not_meaningful_for_different_frequencies")
     return {
         "channels": [left.channel, right.channel],
         "left_channel": left.channel,
         "right_channel": right.channel,
-        "common_time": {**common["metadata"], "same_acquisition": same_acquisition},
+        "common_time": common_time,
         "frequency": {
             "left_hz": left_frequency,
             "right_hz": right_frequency,
@@ -142,6 +158,38 @@ def _common_time_axis(
             "samples": count,
         },
     }
+
+
+def _skipped_analysis(reason: str) -> dict[str, Any]:
+    return {"status": "skipped", "reason": reason}
+
+
+def _fundamental_phase_degrees(common: dict[str, Any], *, frequency_hz: float) -> float | None:
+    """在 common_time 上取基波单点 DFT，返回 right 相对 left 的相位滞后（度，[0, 360)）。"""
+    times = common["time_s"]
+    left = np.asarray(common["left_v"], dtype=np.float64)
+    right = np.asarray(common["right_v"], dtype=np.float64)
+    if frequency_hz <= 0 or times.size < 8:
+        return None
+    phase_left = _single_bin_phase(times, left, frequency_hz)
+    phase_right = _single_bin_phase(times, right, frequency_hz)
+    if phase_left is None or phase_right is None:
+        return None
+    return float((-math.degrees(_wrap_angle(phase_right - phase_left))) % 360.0)
+
+
+def _single_bin_phase(times: np.ndarray, values: np.ndarray, frequency_hz: float) -> float | None:
+    angle = -2.0 * math.pi * frequency_hz * times
+    real = float(np.dot(values, np.cos(angle)))
+    imaginary = float(np.dot(values, np.sin(angle)))
+    if abs(real) <= 1e-18 and abs(imaginary) <= 1e-18:
+        return None
+    return math.atan2(imaginary, real)
+
+
+def _wrap_angle(angle: float) -> float:
+    wrapped = (angle + math.pi) % (2.0 * math.pi)
+    return wrapped - math.pi
 
 
 def _correlation_payload(common: dict[str, Any], *, warnings: list[str]) -> dict[str, Any]:

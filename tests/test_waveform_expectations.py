@@ -1,10 +1,13 @@
 import numpy as np
+import pytest
 
 from wavebench.data.expectations import (
     estimate_triangle_symmetry_percent,
     evaluate_waveform_expectation,
     expectation_summary,
+    validate_expectation,
 )
+from wavebench.errors import ConfigError
 from wavebench.instruments.models import WaveformData, WaveformHeader
 
 
@@ -99,3 +102,108 @@ def test_expectation_summary_rolls_up_channel_statuses():
     )
 
     assert summary == {"status": "warn", "channels": {"1": "pass", "2": "warn"}}
+
+
+def test_validate_expectation_rejects_unknown_field():
+    # 拼错的字段名不能被静默忽略
+    with pytest.raises(ConfigError, match="unknown expectation field"):
+        validate_expectation({"frequncy_hz": 1000})
+
+
+@pytest.mark.parametrize(
+    "expectation",
+    [
+        {"frequency_hz": "1000"},
+        {"frequency_hz": True},
+        {"frequency_hz": float("nan")},
+        {"frequency_hz": float("inf")},
+        {"vpp_v": -1.0},
+        {"vpp_v": 0.0},
+        {"frequency_tolerance_ratio": -0.1},
+        {"duty_cycle": 1.5},
+        {"duty_percent": 120.0},
+        {"symmetry_percent": 150.0},
+        {"symmetry_tolerance_percent": -1.0},
+        {"label": ""},
+    ],
+)
+def test_validate_expectation_rejects_invalid_values(expectation):
+    with pytest.raises(ConfigError):
+        validate_expectation(expectation)
+
+
+def test_validate_expectation_rejects_conflicting_synonyms():
+    with pytest.raises(ConfigError, match="must not set both"):
+        validate_expectation({"duty_cycle": 0.5, "duty_percent": 50.0})
+    with pytest.raises(ConfigError, match="must not set both"):
+        validate_expectation({"mean_v": 0.0, "offset_v": 0.0})
+
+
+def test_expectation_without_checkable_metric_is_skipped_not_passed():
+    times = np.linspace(0.0, 0.001, 100)
+    waveform = _waveform(1, times, np.sin(2 * np.pi * 1000 * times))
+
+    # 只有 label/shape 时没有任何可执行检查，必须显式 skipped 而不是 pass
+    result = evaluate_waveform_expectation(waveform, {"label": "sine", "shape": "sine"})
+
+    assert result["status"] == "skipped"
+    assert result["checks"] == []
+    assert "no checkable metric" in result["message"]
+
+
+def test_evaluate_waveform_expectation_rejects_typo_before_any_check():
+    times = np.linspace(0.0, 0.001, 100)
+    waveform = _waveform(1, times, np.sin(2 * np.pi * 1000 * times))
+
+    with pytest.raises(ConfigError, match="unknown expectation field"):
+        evaluate_waveform_expectation(waveform, {"frequncy_hz": 1000})
+
+
+def _triangle(times: np.ndarray, *, period: float, symmetry_percent: float, vpp: float) -> np.ndarray:
+    phase = (times % period) / period
+    rising = symmetry_percent / 100.0
+    values = np.where(
+        phase < rising,
+        phase / rising,
+        1.0 - (phase - rising) / (1.0 - rising),
+    )
+    return values * vpp - vpp / 2.0
+
+
+@pytest.mark.parametrize("symmetry", [10.0, 50.0, 90.0])
+def test_triangle_symmetry_is_robust_to_noise_quantization_and_overshoot(symmetry):
+    period = 20e-6
+    times = np.linspace(0.0, 20 * period, 20_000, endpoint=False)
+    period = float(times[1] - times[0]) * 1000.0
+    clean = _triangle(times, period=period, symmetry_percent=symmetry, vpp=2.0)
+
+    rng = np.random.default_rng(20260928)
+    # 1 mV 噪声 + 1 mV 量化台阶：逐点差分符号会被噪声打乱
+    noisy = np.round(clean + rng.normal(0.0, 1e-3, clean.size), 3)
+    # 5 mV 噪声 + 轻微过冲
+    overshoot = clean + rng.normal(0.0, 5e-3, clean.size) + 0.02 * np.sin(2 * np.pi * 5 / period * times)
+
+    for values in (noisy, overshoot):
+        measured = estimate_triangle_symmetry_percent(
+            _waveform(1, times, values),
+            expected_frequency_hz=1.0 / period,
+        )
+        assert measured is not None
+        assert abs(measured - symmetry) < 3.0, (symmetry, measured)
+
+
+def test_triangle_symmetry_uses_expected_frequency_to_ignore_short_glitches():
+    period = 20e-6
+    times = np.linspace(0.0, 20 * period, 20_000, endpoint=False)
+    period = float(times[1] - times[0]) * 1000.0
+    values = _triangle(times, period=period, symmetry_percent=10.0, vpp=2.0)
+    # 在上升沿插入一个远窄于半周期的毛刺；期望频率约束应把它排除在极值序列之外
+    values[times.size // 2 : times.size // 2 + 20] += 0.3
+
+    measured = estimate_triangle_symmetry_percent(
+        _waveform(1, times, values),
+        expected_frequency_hz=1.0 / period,
+    )
+
+    assert measured is not None
+    assert abs(measured - 10.0) < 3.0

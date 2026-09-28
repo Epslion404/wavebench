@@ -179,9 +179,11 @@ value_vpp = 1.0
             self.assertFalse(any("output" in name.lower() for name in names))
             self.assertFalse(any(name.lower().endswith((".on", ".off")) for name in names))
             by_name = {tool["name"]: tool for tool in payload["tools"]}
-            self.assertFalse(by_name["scope.observe"]["read_only"])
-            self.assertTrue(by_name["scope.observe"]["mutates_instrument"])
-            self.assertTrue(by_name["scope.observe"]["instrument_state_effects"])
+            # 所有 MCP 工具都必须是纯只读：不改变仪器状态
+            for name, tool in by_name.items():
+                self.assertTrue(tool["read_only"], name)
+                self.assertFalse(tool["mutates_instrument"], name)
+                self.assertEqual(tool["instrument_state_effects"], [], name)
 
     def test_call_run_schema_succeeds(self):
         with TemporaryDirectory() as tmp:
@@ -389,8 +391,8 @@ value_vpp = 1.0
                 "wavebench.mcp_http.scope_observe_payload",
                 return_value={
                     "status": "ok",
-                    "read_only": False,
-                    "mutates_instrument": True,
+                    "read_only": True,
+                    "mutates_instrument": False,
                     "raw_scpi": False,
                     "observation": {"channel": 2, "channels": [2, 3]},
                 },
@@ -402,23 +404,20 @@ value_vpp = 1.0
                     token="test-token",
                     body={
                         "tool": "scope.observe",
-                        "arguments": {
-                            "channels": [2, 3],
-                            "fetch_waveform": True,
-                            "expectations": {"2": {"frequency_hz": 1000}},
-                        },
+                        "arguments": {"channels": [2, 3]},
                     },
                 )
 
             self.assertEqual(status, 200)
             self.assertEqual(payload["result"]["status"], "ok")
-            self.assertFalse(payload["result"]["read_only"])
-            self.assertTrue(payload["result"]["mutates_instrument"])
+            self.assertTrue(payload["result"]["read_only"])
+            self.assertFalse(payload["result"]["mutates_instrument"])
             observe.assert_called_once()
             self.assertIsNone(observe.call_args.kwargs["channel"])
             self.assertEqual(observe.call_args.kwargs["channels"], (2, 3))
-            self.assertTrue(observe.call_args.kwargs["fetch_waveform"])
-            self.assertEqual(observe.call_args.kwargs["expectations"], {2: {"frequency_hz": 1000}})
+            # 只读工具不接受任何波形或期望值参数
+            self.assertNotIn("fetch_waveform", observe.call_args.kwargs)
+            self.assertNotIn("expectations", observe.call_args.kwargs)
 
     def test_call_scope_observe_rejects_non_integer_channel(self):
         with TemporaryDirectory() as tmp:
@@ -464,9 +463,8 @@ value_vpp = 1.0
                         "tool": "scope.advise",
                         "arguments": {
                             "channels": [1, 2],
-                            "fetch_waveform": False,
                             "target_cycles": 8,
-                            "expectations": {"1": {"frequency_hz": 1000}},
+                            "expected_frequencies_hz": {"1": 1000},
                         },
                     },
                 )
@@ -476,7 +474,7 @@ value_vpp = 1.0
         advise.assert_called_once()
         self.assertEqual(advise.call_args.kwargs["channels"], (1, 2))
         self.assertEqual(advise.call_args.kwargs["target_cycles"], 8.0)
-        self.assertEqual(advise.call_args.kwargs["expectations"], {1: {"frequency_hz": 1000}})
+        self.assertEqual(advise.call_args.kwargs["expected_frequencies_hz"], {1: 1000.0})
 
     def test_call_doctor_config_returns_structured_records(self):
         with TemporaryDirectory() as tmp:

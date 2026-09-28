@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -234,38 +235,25 @@ def _optional_bool(arguments: dict[str, Any], name: str, default: bool) -> bool:
 
 
 def _scope_observe_tool(arguments: dict[str, Any], config_path: Path) -> dict[str, Any]:
-    channel = arguments.get("channel")
-    if channel is not None and (isinstance(channel, bool) or not isinstance(channel, int)):
-        raise ConfigError("channel must be an integer / channel 必须是整数")
-    raw_channels = arguments.get("channels")
-    channels = None
-    if raw_channels is not None:
-        if not isinstance(raw_channels, list):
-            raise ConfigError("channels must be an array / channels 必须是数组")
-        channels = tuple(raw_channels)
-        if any(isinstance(item, bool) or not isinstance(item, int) for item in channels):
-            raise ConfigError("channels must contain integers / channels 必须包含整数")
-    expectations = _scope_expectations_argument(arguments.get("expectations"))
+    channel, channels = _scope_channel_arguments(arguments)
     return scope_observe_payload(
         config_path=_reject_sensitive_path(config_path, label="config"),
         channel=channel,
         channels=channels,
-        fetch_waveform=_optional_bool(arguments, "fetch_waveform", False),
         allow_50ohm=_optional_bool(arguments, "allow_50ohm", False),
-        expectations=expectations,
     )
 
 
 def _scope_advise_tool(arguments: dict[str, Any], config_path: Path) -> dict[str, Any]:
     channel, channels = _scope_channel_arguments(arguments)
-    expectations = _scope_expectations_argument(arguments.get("expectations"))
     return scope_advise_payload(
         config_path=_reject_sensitive_path(config_path, label="config"),
         channel=channel,
         channels=channels,
-        fetch_waveform=_optional_bool(arguments, "fetch_waveform", False),
         allow_50ohm=_optional_bool(arguments, "allow_50ohm", False),
-        expectations=expectations,
+        expected_frequencies_hz=_expected_frequencies_argument(
+            arguments.get("expected_frequencies_hz")
+        ),
         target_cycles=_optional_positive_number(arguments, "target_cycles", 10.0),
         target_vertical_divisions=_optional_positive_number(
             arguments,
@@ -292,27 +280,34 @@ def _scope_channel_arguments(arguments: dict[str, Any]) -> tuple[int | None, tup
 
 def _optional_positive_number(arguments: dict[str, Any], name: str, default: float) -> float:
     value = arguments.get(name, default)
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-        raise ConfigError(f"{name} must be a positive number / {name} 必须是正数")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or value <= 0
+    ):
+        raise ConfigError(f"{name} must be a finite positive number / {name} 必须是有限正数")
     return float(value)
 
 
-def _scope_expectations_argument(raw: Any) -> dict[int, dict[str, Any]] | None:
+def _expected_frequencies_argument(raw: Any) -> dict[int, float] | None:
     if raw is None:
         return None
     if not isinstance(raw, dict):
-        raise ConfigError("expectations must be an object / expectations 必须是对象")
-    parsed: dict[int, dict[str, Any]] = {}
+        raise ConfigError("expected_frequencies_hz must be an object / expected_frequencies_hz 必须是对象")
+    parsed: dict[int, float] = {}
     for key, value in raw.items():
         try:
             channel = int(key)
         except (TypeError, ValueError) as exc:
-            raise ConfigError("expectations keys must be channel numbers / expectations 键必须是通道号") from exc
+            raise ConfigError(
+                "expected_frequencies_hz keys must be channel numbers / expected_frequencies_hz 键必须是通道号"
+            ) from exc
         if channel < 1:
-            raise ConfigError("expectations channel must be >= 1 / expectations 通道必须 >= 1")
-        if not isinstance(value, dict):
-            raise ConfigError("expectations entries must be objects / expectations 条目必须是对象")
-        parsed[channel] = dict(value)
+            raise ConfigError("expected_frequencies_hz channel must be >= 1 / 通道必须 >= 1")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError("expected_frequencies_hz values must be numbers / 频率必须是数字")
+        parsed[channel] = float(value)
     return parsed
 
 
@@ -380,8 +375,9 @@ READ_ONLY_TOOLS: dict[str, ToolSpec] = {
     "scope.observe": ToolSpec(
         name="scope.observe",
         description=(
-            "Read configured scope identity, state, and coupling safety. With fetch_waveform=true, "
-            "also read waveform summaries, which may change waveform-transfer source/mode/format."
+            "Read configured scope identity, per-channel state snapshot, and input-coupling safety. "
+            "Never reads waveforms and never changes instrument state / "
+            "只读观察配置中的示波器身份、通道状态与输入耦合安全；不读取波形，不改变仪器状态"
         ),
         arguments={
             "type": "object",
@@ -393,41 +389,11 @@ READ_ONLY_TOOLS: dict[str, ToolSpec] = {
                     "minItems": 1,
                     "uniqueItems": True,
                 },
-                "fetch_waveform": {"type": "boolean", "default": False},
                 "allow_50ohm": {"type": "boolean", "default": False},
-                "expectations": {
-                    "type": "object",
-                    "additionalProperties": {
-                        "type": "object",
-                        "properties": {
-                            "label": {"type": "string"},
-                            "shape": {"type": "string"},
-                            "frequency_hz": {"type": "number", "exclusiveMinimum": 0},
-                            "frequency_tolerance_ratio": {"type": "number", "minimum": 0},
-                            "vpp_v": {"type": "number", "exclusiveMinimum": 0},
-                            "vpp_tolerance_ratio": {"type": "number", "minimum": 0},
-                            "mean_v": {"type": "number"},
-                            "offset_v": {"type": "number"},
-                            "mean_tolerance_v": {"type": "number", "minimum": 0},
-                            "duty_cycle": {"type": "number", "minimum": 0, "maximum": 1},
-                            "duty_percent": {"type": "number", "minimum": 0, "maximum": 100},
-                            "duty_tolerance": {"type": "number", "minimum": 0},
-                            "symmetry_percent": {"type": "number", "minimum": 0, "maximum": 100},
-                            "symmetry_tolerance_percent": {"type": "number", "minimum": 0},
-                        },
-                        "additionalProperties": False,
-                    },
-                },
             },
             "additionalProperties": False,
         },
         handler=_scope_observe_tool,
-        read_only=False,
-        mutates_instrument=True,
-        instrument_state_effects=(
-            "fetch_waveform=true may change waveform transfer source/mode/format",
-            "fetch_waveform=true may enable the requested channel display on some drivers",
-        ),
     ),
     "doctor.config": ToolSpec(
         name="doctor.config",
@@ -447,8 +413,10 @@ READ_ONLY_TOOLS: dict[str, ToolSpec] = {
     "scope.advise": ToolSpec(
         name="scope.advise",
         description=(
-            "Observe the configured scope and recommend display/acquisition settings without applying "
-            "recommendations. With fetch_waveform=true, waveform reads may change transfer state."
+            "Observe the configured scope and recommend display/acquisition settings from the "
+            "read-only state snapshot and caller-provided expected frequencies; never reads waveforms "
+            "and never applies recommendations / "
+            "基于只读状态快照与调用方给出的期望频率建议显示/采集参数；不读取波形，不应用建议"
         ),
         arguments={
             "type": "object",
@@ -460,7 +428,6 @@ READ_ONLY_TOOLS: dict[str, ToolSpec] = {
                     "minItems": 1,
                     "uniqueItems": True,
                 },
-                "fetch_waveform": {"type": "boolean", "default": False},
                 "allow_50ohm": {"type": "boolean", "default": False},
                 "target_cycles": {"type": "number", "exclusiveMinimum": 0, "default": 10},
                 "target_vertical_divisions": {
@@ -468,39 +435,14 @@ READ_ONLY_TOOLS: dict[str, ToolSpec] = {
                     "exclusiveMinimum": 0,
                     "default": 5,
                 },
-                "expectations": {
+                "expected_frequencies_hz": {
                     "type": "object",
-                    "additionalProperties": {
-                        "type": "object",
-                        "properties": {
-                            "label": {"type": "string"},
-                            "shape": {"type": "string"},
-                            "frequency_hz": {"type": "number", "exclusiveMinimum": 0},
-                            "frequency_tolerance_ratio": {"type": "number", "minimum": 0},
-                            "vpp_v": {"type": "number", "exclusiveMinimum": 0},
-                            "vpp_tolerance_ratio": {"type": "number", "minimum": 0},
-                            "mean_v": {"type": "number"},
-                            "offset_v": {"type": "number"},
-                            "mean_tolerance_v": {"type": "number", "minimum": 0},
-                            "duty_cycle": {"type": "number", "minimum": 0, "maximum": 1},
-                            "duty_percent": {"type": "number", "minimum": 0, "maximum": 100},
-                            "duty_tolerance": {"type": "number", "minimum": 0},
-                            "symmetry_percent": {"type": "number", "minimum": 0, "maximum": 100},
-                            "symmetry_tolerance_percent": {"type": "number", "minimum": 0},
-                        },
-                        "additionalProperties": False,
-                    },
+                    "additionalProperties": {"type": "number", "exclusiveMinimum": 0},
                 },
             },
             "additionalProperties": False,
         },
         handler=_scope_advise_tool,
-        read_only=False,
-        mutates_instrument=True,
-        instrument_state_effects=(
-            "fetch_waveform=true may change waveform transfer source/mode/format",
-            "fetch_waveform=true may enable the requested channel display on some drivers",
-        ),
     ),
 }
 

@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from wavebench.data.relationships import analyze_waveform_pair, analyze_waveform_relationships
 from wavebench.instruments.models import WaveformData, WaveformHeader
@@ -30,7 +31,7 @@ def test_waveform_pair_reports_frequency_voltage_and_phase_for_related_signals()
     assert relationship["phase_degrees_at_left_frequency"] is not None
 
 
-def test_waveform_pair_suppresses_phase_when_not_same_acquisition():
+def test_waveform_pair_skips_timing_analysis_when_not_same_acquisition():
     t = np.linspace(0.0, 0.009, 1000)
     left = _waveform(1, np.sin(2 * np.pi * 1000 * t), stop=float(t[-1]))
     right = _waveform(2, np.sin(2 * np.pi * 1000 * (t - 0.00025)), stop=float(t[-1]))
@@ -38,8 +39,45 @@ def test_waveform_pair_suppresses_phase_when_not_same_acquisition():
     relationship = analyze_waveform_pair(left, right, same_acquisition=False)
 
     assert relationship["common_time"]["same_acquisition"] is False
+    assert relationship["common_time"]["overlap"] is None
     assert relationship["phase_degrees_at_left_frequency"] is None
-    assert "not_same_acquisition_timing_relationships_are_advisory" in relationship["warnings"]
+    # 跨采集的波形没有共同时间基准，相关性和交点必须整段跳过而不是给出看似精确的数字
+    assert relationship["correlation"] == {"status": "skipped", "reason": "not_same_acquisition"}
+    assert relationship["intersections"] == {"status": "skipped", "reason": "not_same_acquisition"}
+    assert "not_same_acquisition_timing_relationships_skipped" in relationship["warnings"]
+    # 同步无关的量仍然保留
+    assert relationship["frequency"]["ratio_high_over_low"] == 1.0
+
+
+def test_waveform_pair_reports_phase_lag_in_degrees():
+    t = np.linspace(0.0, 0.004, 4000)
+    left = _waveform(1, np.sin(2 * np.pi * 1000 * t), stop=float(t[-1]))
+
+    for expected_degrees in (0.0, 90.0, 180.0, 270.0):
+        right = _waveform(
+            2,
+            np.sin(2 * np.pi * 1000 * t - np.deg2rad(expected_degrees)),
+            stop=float(t[-1]),
+        )
+
+        relationship = analyze_waveform_pair(left, right)
+
+        assert relationship["phase_degrees_at_left_frequency"] == pytest.approx(
+            expected_degrees, abs=0.5
+        )
+
+
+def test_waveform_pair_reports_180_degrees_for_inverted_signal():
+    t = np.linspace(0.0, 0.004, 4000)
+    left = np.sin(2 * np.pi * 1000 * t)
+
+    relationship = analyze_waveform_pair(
+        _waveform(1, left, stop=float(t[-1])),
+        _waveform(2, -left, stop=float(t[-1])),
+    )
+
+    # 用相关峰绝对值选 lag 会把它报成 0°
+    assert relationship["phase_degrees_at_left_frequency"] == pytest.approx(180.0, abs=0.5)
 
 
 def test_waveform_relationships_report_all_pairs_for_four_channels():

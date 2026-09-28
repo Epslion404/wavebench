@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -12,34 +13,63 @@ def scope_advise_payload(
     config_path: str | Path,
     channel: int | None = None,
     channels: tuple[int, ...] | None = None,
-    fetch_waveform: bool = False,
     allow_50ohm: bool = False,
-    expectations: dict[int, dict[str, Any]] | None = None,
+    expected_frequencies_hz: dict[int, float] | None = None,
     target_cycles: float = 10.0,
     target_vertical_divisions: float = 5.0,
+    resource: str | None = None,
 ) -> dict[str, Any]:
-    if target_cycles <= 0:
-        raise ConfigError("scope.advise target_cycles must be > 0")
-    if target_vertical_divisions <= 0:
-        raise ConfigError("scope.advise target_vertical_divisions must be > 0")
+    """只读建议：基于示波器状态快照和调用方提供的期望频率给出显示/时基建议。
+
+    该函数不读取波形、不改变仪器状态，也不基于低置信度的测量频率下结论。
+    需要基于实测波形的建议时，使用 ``scope_waveform_report_payload`` 的结果调用
+    ``scope_advise_from_observation``。
+    """
+    # 参数校验必须发生在打开任何仪器会话之前
+    target_cycles = _positive_finite(target_cycles, name="scope.advise target_cycles")
+    target_vertical_divisions = _positive_finite(
+        target_vertical_divisions,
+        name="scope.advise target_vertical_divisions",
+    )
+    expected_frequencies = _normalize_expected_frequencies(expected_frequencies_hz)
     observation = scope_observe_payload(
         config_path=config_path,
         channel=channel,
         channels=channels,
-        fetch_waveform=fetch_waveform,
         allow_50ohm=allow_50ohm,
-        expectations=expectations if fetch_waveform else None,
+        resource=resource,
     )
+    return scope_advise_from_observation(
+        observation,
+        expected_frequencies_hz=expected_frequencies,
+        target_cycles=target_cycles,
+        target_vertical_divisions=target_vertical_divisions,
+    )
+
+
+def scope_advise_from_observation(
+    observation: dict[str, Any],
+    *,
+    expected_frequencies_hz: dict[int, float] | None = None,
+    target_cycles: float = 10.0,
+    target_vertical_divisions: float = 5.0,
+) -> dict[str, Any]:
+    target_cycles = _positive_finite(target_cycles, name="scope.advise target_cycles")
+    target_vertical_divisions = _positive_finite(
+        target_vertical_divisions,
+        name="scope.advise target_vertical_divisions",
+    )
+    expected = _normalize_expected_frequencies(expected_frequencies_hz)
     recommendations = _recommendations(
         observation,
-        expectations=expectations or {},
-        target_cycles=float(target_cycles),
-        target_vertical_divisions=float(target_vertical_divisions),
+        expected_frequencies=expected,
+        target_cycles=target_cycles,
+        target_vertical_divisions=target_vertical_divisions,
     )
     return {
         "status": observation["status"],
         "read_only": observation["read_only"],
-        "query_only": observation.get("query_only", observation["read_only"]),
+        "query_only": observation["query_only"],
         "mutates_instrument": observation["mutates_instrument"],
         "raw_scpi": False,
         "applies_recommendations": False,
@@ -49,22 +79,42 @@ def scope_advise_payload(
             "channels": observation["observation"]["channels"],
             "fetch_waveform": observation["observation"]["fetch_waveform"],
         },
+        "expected_frequencies_hz": {str(item): value for item, value in sorted(expected.items())},
         "recommendations": recommendations,
         "agent_hints": _agent_hints(observation, recommendations),
         "warnings": observation["warnings"],
     }
 
 
+def _normalize_expected_frequencies(values: dict[int, float] | None) -> dict[int, float]:
+    if values is None:
+        return {}
+    normalized: dict[int, float] = {}
+    for channel, value in values.items():
+        if isinstance(channel, bool) or not isinstance(channel, int) or channel < 1:
+            raise ConfigError("expected frequency channel must be a positive integer")
+        normalized[channel] = _positive_finite(value, name=f"expected frequency for channel {channel}")
+    return normalized
+
+
+def _positive_finite(value: Any, *, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"{name} must be a number")
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise ConfigError(f"{name} must be finite and > 0")
+    return number
+
+
 def _recommendations(
     observation: dict[str, Any],
     *,
-    expectations: dict[int, dict[str, Any]],
+    expected_frequencies: dict[int, float],
     target_cycles: float,
     target_vertical_divisions: float,
 ) -> list[dict[str, Any]]:
     recommendations: list[dict[str, Any]] = []
     channels = observation.get("channels", [])
-    expected_frequencies = _expected_frequencies(expectations)
     channel_profiles: dict[int, dict[str, Any]] = {}
     for channel_section in channels:
         channel = channel_section.get("channel")
@@ -72,7 +122,7 @@ def _recommendations(
             continue
         summary = _waveform_summary(channel_section)
         snapshot = _scope_status_data(channel_section)
-        frequency_hz, source, confidence = _frequency_for_advice(
+        frequency_hz, source, confidence, withheld_reason = _frequency_for_advice(
             summary,
             expected_frequencies.get(channel),
         )
@@ -89,7 +139,7 @@ def _recommendations(
         channel_profiles[channel] = {
             "channel": channel,
             "frequency_hz": frequency_hz,
-            "frequency_source": source if frequency_hz is not None else None,
+            "frequency_source": source,
             "frequency_confidence": confidence,
             "time_range_s": time_range,
             "vertical_scale_v_per_div": vertical_scale,
@@ -105,11 +155,25 @@ def _recommendations(
                     {"channel": channel, "state": "on"},
                 )
             )
+        if time_range is None and withheld_reason is not None:
+            # 低置信度测量又没有可用的期望频率时，明确说明为何不给时基建议
+            recommendations.append(
+                {
+                    "id": "timebase_advice_withheld",
+                    "priority": "normal",
+                    "channel": channel,
+                    "action": "provide_expected_frequency",
+                    "reason": withheld_reason,
+                    "mutates_instrument_if_applied": False,
+                    "raw_scpi": False,
+                }
+            )
         if time_range is not None or vertical_scale is not None:
             reason = _focus_reason(
                 summary,
                 frequency_hz,
                 source,
+                confidence,
                 target_cycles=target_cycles,
             )
             priority = "high" if _needs_focus(summary, channel, expected_frequencies) else "normal"
@@ -178,46 +242,47 @@ def _scope_status_data(channel_section: dict[str, Any]) -> dict[str, Any] | None
     return data if isinstance(data, dict) else None
 
 
+def _frequency_for_advice(
+    summary: dict[str, Any] | None,
+    expected_frequency_hz: float | None,
+) -> tuple[float | None, str | None, str | None, str | None]:
+    """返回 (频率, 来源, 置信度, 撤回建议的原因)。
+
+    低置信度的测量频率（``low_cycle_count`` 等质量告警）不能用来推导时基建议；
+    此时优先回退到调用方提供的期望频率，没有期望频率就不给时基建议。
+    """
+    measured = _summary_frequency(summary)
+    if measured is not None and not _summary_frequency_low_confidence(summary):
+        return measured, "measured", "measured", None
+    if expected_frequency_hz is not None:
+        source = "expected" if measured is None else "expected_over_low_confidence_measurement"
+        return expected_frequency_hz, source, "configured", None
+    if measured is not None:
+        return (
+            None,
+            None,
+            "low",
+            "measured frequency is low confidence (few cycles in window) and no expected frequency was provided",
+        )
+    return None, None, None, None
+
+
 def _summary_frequency(summary: dict[str, Any] | None) -> float | None:
     if summary is None:
         return None
     value = summary.get("frequency_estimate_hz")
-    if not isinstance(value, (int, float)) or value <= 0:
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
         return None
     return float(value)
 
 
-def _summary_frequency_confidence(summary: dict[str, Any] | None) -> str | None:
-    if summary is None or _summary_frequency(summary) is None:
-        return None
-    warnings = summary.get("quality_warnings", [])
-    if any(str(item).startswith("low_cycle_count") for item in warnings):
-        return "low"
-    return "measured"
-
-
-def _frequency_for_advice(
-    summary: dict[str, Any] | None,
-    expected_frequency_hz: float | None,
-) -> tuple[float | None, str | None, str | None]:
-    measured = _summary_frequency(summary)
-    confidence = _summary_frequency_confidence(summary)
-    if expected_frequency_hz is not None and confidence == "low":
-        return expected_frequency_hz, "expected", "configured"
-    if measured is not None:
-        return measured, "measured", confidence
-    if expected_frequency_hz is not None:
-        return expected_frequency_hz, "expected", "configured"
-    return None, None, None
-
-
-def _expected_frequencies(expectations: dict[int, dict[str, Any]]) -> dict[int, float]:
-    values: dict[int, float] = {}
-    for channel, expectation in expectations.items():
-        value = expectation.get("frequency_hz")
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
-            values[channel] = float(value)
-    return values
+def _summary_frequency_low_confidence(summary: dict[str, Any] | None) -> bool:
+    if summary is None:
+        return False
+    return any(
+        str(item).startswith("low_cycle_count")
+        for item in summary.get("quality_warnings", []) or []
+    )
 
 
 def _recommended_time_range(frequency_hz: float, *, target_cycles: float) -> float:
@@ -231,12 +296,12 @@ def _recommended_vertical_scale(
     target_vertical_divisions: float,
 ) -> float | None:
     vpp = None if summary is None else summary.get("voltage_vpp_v")
-    if isinstance(vpp, (int, float)) and vpp > 0:
+    if isinstance(vpp, (int, float)) and not isinstance(vpp, bool) and vpp > 0:
         return float(vpp) / target_vertical_divisions
     scale = None
     if snapshot is not None:
         scale = snapshot.get("channel", {}).get("scale_v_per_div")
-    if isinstance(scale, (int, float)) and scale > 0:
+    if isinstance(scale, (int, float)) and not isinstance(scale, bool) and scale > 0:
         return float(scale)
     return None
 
@@ -256,27 +321,22 @@ def _needs_focus(
     points_per_cycle = summary.get("points_per_cycle")
     if isinstance(points_per_cycle, (int, float)) and points_per_cycle < 20.0:
         return True
-    quality = summary.get("quality_warnings", [])
-    return bool(quality)
+    return bool(summary.get("quality_warnings"))
 
 
 def _focus_reason(
     summary: dict[str, Any] | None,
     frequency_hz: float | None,
-    frequency_source: str,
+    frequency_source: str | None,
+    frequency_confidence: str | None,
     *,
     target_cycles: float,
 ) -> str:
     parts: list[str] = []
     if frequency_hz is not None:
-        confidence_note = (
-            " (low-confidence estimate)"
-            if frequency_source == "measured" and _summary_frequency_confidence(summary) == "low"
-            else ""
-        )
         parts.append(
-            f"use {frequency_source} frequency {frequency_hz:.6g} Hz{confidence_note} "
-            f"to show about {target_cycles:.3g} cycles"
+            f"use {frequency_source} frequency {frequency_hz:.6g} Hz "
+            f"(confidence={frequency_confidence}) to show about {target_cycles:.3g} cycles"
         )
     if summary is not None:
         cycles = summary.get("estimated_cycles")
@@ -351,8 +411,13 @@ def _agent_hints(
     hints = list(observation.get("agent_hints", []))
     if any(item["id"] == "separate_timebase_profiles" for item in recommendations):
         hints.append("advise: run focus/observe per channel when frequencies differ greatly")
+    if any(item["id"] == "timebase_advice_withheld" for item in recommendations):
+        hints.append(
+            "advise: timebase advice withheld for at least one channel because the measured frequency "
+            "is low confidence and no expected frequency was provided"
+        )
     if observation.get("mutates_instrument"):
-        hints.append("advise: waveform fetch was used only to compute advice; recommendations were not applied")
+        hints.append("advise: recommendations were computed from an explicit waveform read and were not applied")
     else:
-        hints.append("advise: recommendations were computed without applying instrument changes")
+        hints.append("advise: recommendations were computed without reading waveforms or changing instrument state")
     return hints
