@@ -104,6 +104,24 @@ def test_expectation_summary_rolls_up_channel_statuses():
     assert summary == {"status": "warn", "channels": {"1": "pass", "2": "warn"}}
 
 
+@pytest.mark.parametrize(("statuses", "expected"), [
+    ([], "skipped"),
+    (["skipped"], "skipped"),
+    (["unavailable"], "unavailable"),
+    (["unavailable", "skipped"], "unavailable"),
+    (["unavailable", "pass"], "partial"),
+    (["unavailable", "warn"], "partial"),
+    (["unavailable", "fail"], "fail"),
+])
+def test_expectation_summary_accounts_for_unavailable_channels(statuses, expected):
+    results = {channel: {"status": status} for channel, status in enumerate(statuses, 1)}
+
+    assert expectation_summary(results) == {
+        "status": expected,
+        "channels": {str(channel): result["status"] for channel, result in results.items()},
+    }
+
+
 def test_validate_expectation_rejects_unknown_field():
     # 拼错的字段名不能被静默忽略
     with pytest.raises(ConfigError, match="unknown expectation field"):

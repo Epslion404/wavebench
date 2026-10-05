@@ -6,8 +6,11 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
-from wavebench.cli import main
+from wavebench.cli import _run_scope_observe, main
+from wavebench.cli_parser import build_parser
+from wavebench.errors import ConfigError
 from wavebench.instruments.models import (
     ScopeAnalogChannelSnapshot,
     ScopeEdgeTriggerSnapshot,
@@ -210,3 +213,36 @@ def test_json_scope_observe_wraps_result_in_versioned_envelope():
     assert envelope["schema"] == "wavebench.cli.result.v1"
     assert envelope["result"]["read_only"] is True
     assert envelope["result"]["observation"]["channels"] == [1]
+
+
+@pytest.mark.parametrize("option", ["--target-cycles", "--target-vertical-divisions"])
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf"])
+@pytest.mark.parametrize("fetch_waveform", [False, True])
+def test_scope_observe_rejects_invalid_targets_before_loading_config(option, value, fetch_waveform):
+    argv = ["scope", "observe", f"{option}={value}"]
+    if fetch_waveform:
+        argv.append("--fetch-waveform")
+    with patch("wavebench.services.agent_observe.load_config") as load:
+        code, _, err = _run(argv)
+
+    assert code != 0
+    assert option.removeprefix("--").replace("-", "_") in err
+    load.assert_not_called()
+    assert _FakeScopeService.instances == []
+
+
+@pytest.mark.parametrize("target", ["target_cycles", "target_vertical_divisions"])
+@pytest.mark.parametrize("value", [True, "1", object()])
+def test_scope_observe_validates_target_types_before_observation(target, value):
+    args = build_parser().parse_args(["scope", "observe", "--fetch-waveform"])
+    setattr(args, target, value)
+    _FakeScopeService.instances = []
+    with (
+        patch("wavebench.services.agent_observe.load_config") as load,
+        patch("wavebench.services.agent_observe.ScopeService", _FakeScopeService),
+        pytest.raises(ConfigError, match=target),
+    ):
+        _run_scope_observe(args)
+
+    load.assert_not_called()
+    assert _FakeScopeService.instances == []

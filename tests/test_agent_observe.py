@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from wavebench.errors import ConfigError
+from wavebench.data.expectations import evaluate_waveform_expectation
 from wavebench.instruments.models import (
     ScopeAnalogChannelSnapshot,
     ScopeEdgeTriggerSnapshot,
@@ -178,6 +179,7 @@ def test_scope_waveform_report_is_an_explicit_write_path():
     assert payload["waveform_source"]["same_acquisition"] is False
     assert payload["channels"][0]["waveform"]["data"]["summary"]["samples"] == 2000
     assert _FakeScopeService.instances[0].fetched_channels == [1]
+    assert payload["expectations"] == {"status": "skipped", "channels": {}}
 
 
 def test_scope_waveform_report_marks_multi_channel_timing_analysis_as_skipped():
@@ -206,6 +208,51 @@ def test_scope_waveform_report_evaluates_channel_expectations():
 
     assert payload["expectations"]["status"] == "pass"
     assert payload["channels"][0]["expectation"]["data"]["checks"][0]["metric"] == "frequency_hz"
+
+
+@pytest.mark.parametrize("failed_channels", [(2,), (1, 2)])
+@pytest.mark.parametrize("failure", ["waveform", "coupling", "evaluation"])
+def test_scope_waveform_report_preserves_unavailable_expectations(failed_channels, failure):
+    class FailingScopeService(_FakeScopeService):
+        def fetch_waveform(self, channel):
+            if failure == "waveform" and channel in failed_channels:
+                raise ConfigError("waveform read failed")
+            return super().fetch_waveform(channel)
+
+        def require_high_impedance(self, channel, *, allow_50ohm=False):
+            if failure == "coupling" and channel in failed_channels:
+                raise ConfigError("coupling safety unavailable")
+            return super().require_high_impedance(channel, allow_50ohm=allow_50ohm)
+
+    def evaluate(waveform, expectation):
+        if failure == "evaluation" and waveform.channel in failed_channels:
+            raise ConfigError("expectation evaluation failed")
+        return evaluate_waveform_expectation(waveform, expectation)
+
+    with TemporaryDirectory() as tmp:
+        config = _write_config(Path(tmp))
+        with (
+            patch("wavebench.services.agent_observe.ScopeService", FailingScopeService),
+            patch("wavebench.services.agent_observe.evaluate_waveform_expectation", evaluate),
+        ):
+            payload = scope_waveform_report_payload(
+                config_path=config,
+                channels=(1, 2),
+                expectations={1: {"vpp_v": 2.0}, 2: {"vpp_v": 2.0}},
+            )
+
+    expected_statuses = {
+        str(channel): "unavailable" if channel in failed_channels else "pass"
+        for channel in (1, 2)
+    }
+    assert payload["status"] == "partial"
+    assert payload["expectations"] == {
+        "status": "unavailable" if len(failed_channels) == 2 else "partial",
+        "channels": expected_statuses,
+    }
+    for channel in failed_channels:
+        assert payload["channels"][channel - 1]["expectation"]["status"] == "unavailable"
+        assert any(f"CH{channel}_expectation_unavailable" in hint for hint in payload["agent_hints"])
 
 
 def test_scope_waveform_report_rejects_invalid_expectation_before_any_instrument_io():

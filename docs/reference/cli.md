@@ -45,6 +45,14 @@ duty_percent = 50
 拼错字段名会直接报错，不会被静默忽略。上面的 TOML 只示范格式，字段全集以该实现为准。任何输入错误都在
 打开仪器会话之前被拒绝，因此不会产生仪器写入。
 
+`--target-cycles` 和 `--target-vertical-divisions` 必须为有限正数，并在加载配置或创建仪器服务
+之前校验。生成的 focus 建议使用 `--vertical-scale CHANNEL=V_PER_DIV`；隐藏其他通道的参数为
+`--hide-others`。建议不会自动执行。
+
+期望值汇总的 `channels` 保留所有待验收通道。波形读取、安全检查或期望值计算失败的通道标记为
+`unavailable`；没有可用检查结果时汇总为 `unavailable`，部分通道已有 `pass`／`warn` 结果时为
+`partial`。已确认的 `fail` 仍优先返回 `fail`。未提供期望值或期望值没有可执行指标时保持 `skipped`。
+
 ## JSON 输出与退出码
 
 将 `--json` 放在命令行任意位置可请求机器可读输出。成功结果使用 `wavebench.cli.result.v1`，包含 `status`、`exit_code` 和 `result`；错误使用 `wavebench.error.v1`。普通成功输出写入标准输出，普通错误写入标准错误。

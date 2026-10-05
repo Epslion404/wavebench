@@ -26,10 +26,9 @@ def scope_advise_payload(
     ``scope_advise_from_observation``。
     """
     # 参数校验必须发生在打开任何仪器会话之前
-    target_cycles = _positive_finite(target_cycles, name="scope.advise target_cycles")
-    target_vertical_divisions = _positive_finite(
-        target_vertical_divisions,
-        name="scope.advise target_vertical_divisions",
+    target_cycles, target_vertical_divisions = validate_scope_advice_targets(
+        target_cycles=target_cycles,
+        target_vertical_divisions=target_vertical_divisions,
     )
     expected_frequencies = _normalize_expected_frequencies(expected_frequencies_hz)
     observation = scope_observe_payload(
@@ -54,10 +53,9 @@ def scope_advise_from_observation(
     target_cycles: float = 10.0,
     target_vertical_divisions: float = 5.0,
 ) -> dict[str, Any]:
-    target_cycles = _positive_finite(target_cycles, name="scope.advise target_cycles")
-    target_vertical_divisions = _positive_finite(
-        target_vertical_divisions,
-        name="scope.advise target_vertical_divisions",
+    target_cycles, target_vertical_divisions = validate_scope_advice_targets(
+        target_cycles=target_cycles,
+        target_vertical_divisions=target_vertical_divisions,
     )
     expected = _normalize_expected_frequencies(expected_frequencies_hz)
     recommendations = _recommendations(
@@ -84,6 +82,16 @@ def scope_advise_from_observation(
         "agent_hints": _agent_hints(observation, recommendations),
         "warnings": observation["warnings"],
     }
+
+
+def validate_scope_advice_targets(
+    *, target_cycles: float, target_vertical_divisions: float,
+) -> tuple[float, float]:
+    """Validate advice targets before observation or instrument I/O."""
+    return (
+        _positive_finite(target_cycles, name="scope.advise target_cycles"),
+        _positive_finite(target_vertical_divisions, name="scope.advise target_vertical_divisions"),
+    )
 
 
 def _normalize_expected_frequencies(values: dict[int, float] | None) -> dict[int, float]:
@@ -398,9 +406,12 @@ def _command_text(command: str, parameters: dict[str, Any]) -> str:
     if parameters.get("time_range_s") is not None:
         pieces.extend(["--time-range", f"{parameters['time_range_s']:.12g}"])
     if parameters.get("vertical_scale_v_per_div") is not None:
-        pieces.extend(["--vertical-scale", f"{parameters['vertical_scale_v_per_div']:.12g}"])
+        pieces.extend([
+            "--vertical-scale",
+            f"{parameters['channel']}={parameters['vertical_scale_v_per_div']:.12g}",
+        ])
     if parameters.get("hide_other_channels"):
-        pieces.append("--hide-other-channels")
+        pieces.append("--hide-others")
     return " ".join(pieces)
 
 

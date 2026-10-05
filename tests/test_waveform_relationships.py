@@ -80,6 +80,20 @@ def test_waveform_pair_reports_180_degrees_for_inverted_signal():
     assert relationship["phase_degrees_at_left_frequency"] == pytest.approx(180.0, abs=0.5)
 
 
+def test_waveform_pair_phase_rejects_dc_leakage_in_noninteger_cycle_window():
+    t = np.linspace(0.0, 0.0045, 4501)
+    left = _waveform(1, np.sin(2 * np.pi * 1000 * t), stop=float(t[-1]))
+    right = _waveform(
+        2, np.sin(2 * np.pi * 1000 * t - np.pi / 2) + 5.0, stop=float(t[-1]),
+    )
+
+    relationship = analyze_waveform_pair(left, right)
+
+    assert relationship["frequency"]["left_hz"] == pytest.approx(1000.0, abs=0.1)
+    assert relationship["frequency"]["right_hz"] == pytest.approx(1000.0, abs=0.1)
+    assert relationship["phase_degrees_at_left_frequency"] == pytest.approx(90.0, abs=0.5)
+
+
 def test_waveform_relationships_report_all_pairs_for_four_channels():
     t = np.linspace(0.0, 0.004, 500)
     waveforms = {

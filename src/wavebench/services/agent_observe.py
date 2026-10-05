@@ -243,7 +243,7 @@ def _observe_channel(
         warnings=warnings,
         name=f"ch{channel}_waveform",
     )
-    if channel in expectations and channel in fetched_waveforms:
+    if channel in expectations and section["waveform"]["status"] == "ok":
         result = _attempt(
             lambda: evaluate_waveform_expectation(
                 fetched_waveforms[channel],
@@ -253,14 +253,18 @@ def _observe_channel(
             name=f"ch{channel}_expectation",
         )
         section["expectation"] = result
-        if result["status"] == "ok":
-            expectation_results[channel] = result["data"]
     elif channel in expectations:
         section["expectation"] = {
             "status": "unavailable",
             "reason": "waveform unavailable",
         }
         warnings.append(f"ch{channel}_expectation_unavailable: waveform unavailable")
+    if channel in expectations:
+        result = section["expectation"]
+        expectation_results[channel] = (
+            result["data"] if result["status"] == "ok"
+            else {**result, "channel": channel, "checks": []}
+        )
     return section
 
 
@@ -357,6 +361,8 @@ def _agent_hints(
             hints.append(f"CH{channel}_expectation_{result['status']}: inspect expectation checks")
         elif result["status"] == "skipped":
             hints.append(f"CH{channel}_expectation_skipped: expectation contains no checkable metric")
+        elif result["status"] == "unavailable":
+            hints.append(f"CH{channel}_expectation_unavailable: acceptance could not be evaluated")
     if sections.get("scope_status", {}).get("status") == "unavailable":
         hints.append("driver lacks scope.snapshot or the status query failed; use identity cautiously")
     if sections.get("coupling", {}).get("status") == "unavailable":

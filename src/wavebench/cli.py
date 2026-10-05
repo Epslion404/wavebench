@@ -116,7 +116,7 @@ from .plugins.registry import build_plugin_registry, has_doctor_errors, plugin_d
 from .plugins.scpi import has_scpi_doctor_errors, load_scpi_plugin, probe_scpi_plugin, scpi_plugin_doctor_records
 from .services.scope_service import ScopeService
 from .services.agent_observe import scope_observe_payload, scope_waveform_report_payload
-from .services.agent_advise import scope_advise_from_observation
+from .services.agent_advise import scope_advise_from_observation, validate_scope_advice_targets
 from .services.source_service import SourceService
 from .services.rf_source_service import RfSourceService
 from .services.power_service import PowerService
@@ -660,6 +660,12 @@ def _expectation_frequencies(
 
 
 def _run_scope_observe(args: argparse.Namespace) -> dict[str, Any]:
+    target_cycles, target_vertical_divisions = validate_scope_advice_targets(
+        target_cycles=10.0 if args.target_cycles is None else args.target_cycles,
+        target_vertical_divisions=(
+            5.0 if args.target_vertical_divisions is None else args.target_vertical_divisions
+        ),
+    )
     channels = tuple(args.channels) if args.channels else None
     expectations = _load_scope_expectations(args.expect)
     if not args.fetch_waveform:
@@ -681,10 +687,8 @@ def _run_scope_observe(args: argparse.Namespace) -> dict[str, Any]:
     advice = scope_advise_from_observation(
         observation,
         expected_frequencies_hz=_expectation_frequencies(expectations),
-        target_cycles=10.0 if args.target_cycles is None else args.target_cycles,
-        target_vertical_divisions=(
-            5.0 if args.target_vertical_divisions is None else args.target_vertical_divisions
-        ),
+        target_cycles=target_cycles,
+        target_vertical_divisions=target_vertical_divisions,
     )
     observation["recommendations"] = advice["recommendations"]
     observation["agent_hints"] = advice["agent_hints"]

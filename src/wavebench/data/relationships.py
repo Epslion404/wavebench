@@ -80,7 +80,7 @@ def analyze_waveform_pair(
             and common_time.get("overlap") is True
         ):
             # 约定：phase_degrees_at_left_frequency 表示 right 相对 left 的相位滞后，取值 [0, 360)。
-            # 用基波频域相位差而不是相关峰 lag：后者对截断窗口和幅度不对称有系统偏差，
+            # 用基波拟合相位差而不是相关峰 lag：后者对截断窗口和幅度不对称有系统偏差，
             # 且直接反相（right = -left）会被绝对值最大化吃掉 180°。
             phase_degrees = _fundamental_phase_degrees(common, frequency_hz=left_frequency)
         elif frequency_ratio is not None and abs(frequency_ratio - 1.0) > 0.01:
@@ -165,7 +165,7 @@ def _skipped_analysis(reason: str) -> dict[str, Any]:
 
 
 def _fundamental_phase_degrees(common: dict[str, Any], *, frequency_hz: float) -> float | None:
-    """在 common_time 上取基波单点 DFT，返回 right 相对 left 的相位滞后（度，[0, 360)）。"""
+    """在 common_time 上拟合基波，返回 right 相对 left 的相位滞后（度，[0, 360)）。"""
     times = common["time_s"]
     left = np.asarray(common["left_v"], dtype=np.float64)
     right = np.asarray(common["right_v"], dtype=np.float64)
@@ -179,12 +179,15 @@ def _fundamental_phase_degrees(common: dict[str, Any], *, frequency_hz: float) -
 
 
 def _single_bin_phase(times: np.ndarray, values: np.ndarray, frequency_hz: float) -> float | None:
-    angle = -2.0 * math.pi * frequency_hz * times
-    real = float(np.dot(values, np.cos(angle)))
-    imaginary = float(np.dot(values, np.sin(angle)))
-    if abs(real) <= 1e-18 and abs(imaginary) <= 1e-18:
+    # 非整数周期窗口内常数、cos、sin 不正交，必须联合拟合以消除 DC 泄漏。
+    angle = 2.0 * math.pi * frequency_hz * (times - times[0])
+    basis = np.column_stack((np.ones_like(angle), np.cos(angle), np.sin(angle)))
+    coefficients, _, rank, _ = np.linalg.lstsq(basis, values, rcond=None)
+    _, cosine, sine = coefficients
+    tolerance = np.finfo(np.float64).eps * max(float(np.max(np.abs(values))), 1.0) * 8
+    if rank < 3 or math.hypot(cosine, sine) <= tolerance:
         return None
-    return math.atan2(imaginary, real)
+    return math.atan2(-sine, cosine)
 
 
 def _wrap_angle(angle: float) -> float:

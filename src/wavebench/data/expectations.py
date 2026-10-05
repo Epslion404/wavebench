@@ -116,9 +116,12 @@ def evaluate_waveform_expectation(
 
 
 def expectation_summary(results: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    """Keep confirmed failures; incomplete acceptance is never a pass."""
     statuses = {result["status"] for result in results.values()}
     if "fail" in statuses:
         status = "fail"
+    elif "unavailable" in statuses:
+        status = "partial" if statuses & {"pass", "warn"} else "unavailable"
     elif "warn" in statuses:
         status = "warn"
     elif "pass" in statuses:

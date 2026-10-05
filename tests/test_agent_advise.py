@@ -1,11 +1,18 @@
+import shlex
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import pytest
 
+from wavebench.cli import _scope_focus_request
+from wavebench.cli_parser import build_parser
 from wavebench.errors import ConfigError
-from wavebench.services.agent_advise import scope_advise_from_observation, scope_advise_payload
+from wavebench.services.agent_advise import (
+    _command_text,
+    scope_advise_from_observation,
+    scope_advise_payload,
+)
 
 
 def _write_config(root: Path) -> Path:
@@ -195,3 +202,49 @@ def test_scope_advise_rejects_invalid_targets(value):
 def test_scope_advise_rejects_invalid_expected_frequencies(value):
     with pytest.raises(ConfigError, match="expected frequency"):
         scope_advise_from_observation(_observation(fetch_waveform=False), expected_frequencies_hz={1: value})
+
+
+@pytest.mark.parametrize("fetch_waveform", [False, True])
+def test_advice_commands_parse_with_real_cli(fetch_waveform):
+    observation = _observation(
+        fetch_waveform=fetch_waveform,
+        measured_frequency={1: 1000.0, 2: 50000.0} if fetch_waveform else None,
+    )
+    observation["channels"][0]["scope_status"]["data"]["channel"]["enabled"] = False
+    payload = scope_advise_from_observation(
+        observation, expected_frequencies_hz={1: 1000.0, 2: 50000.0},
+    )
+    parser = build_parser()
+    commands = [item for item in payload["recommendations"] if "command" in item]
+    assert len(commands) == 3
+    for recommendation in commands:
+        args = parser.parse_args(shlex.split(recommendation["command"])[1:])
+        parameters = recommendation["parameters"]
+        if recommendation["action"] == "scope.display":
+            assert args.channel == parameters["channel"]
+            assert args.state == "on"
+        else:
+            request = _scope_focus_request(args)
+            assert request.channels == (parameters["channel"],)
+            assert request.time_range_s == pytest.approx(parameters["time_range_s"])
+            assert len(request.vertical_scales) == 1
+            assert request.vertical_scales[0].channel == parameters["channel"]
+            assert request.vertical_scales[0].scale_v_per_div == pytest.approx(
+                parameters["vertical_scale_v_per_div"]
+            )
+            assert request.hide_others is False
+
+
+@pytest.mark.parametrize("hide_others", [False, True])
+def test_focus_command_hide_others_uses_real_cli_flag(hide_others):
+    command = _command_text("focus", {
+        "channel": 2,
+        "vertical_scale_v_per_div": 0.25,
+        "hide_other_channels": hide_others,
+    })
+    args = build_parser().parse_args(shlex.split(command)[1:])
+    request = _scope_focus_request(args)
+
+    assert request.channels == (2,)
+    assert request.vertical_scales[0].scale_v_per_div == 0.25
+    assert request.hide_others is hide_others
