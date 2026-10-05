@@ -4,7 +4,7 @@
 > 目标：为插件体系增加第二个类别 `advisor`，并把它与安全相关的通用能力（数据外发同意门、
 > decision artifact）收归 Core
 > 首版外部实现：TypeSafe Jev（System One model）；完整覆盖 Choice、Score 和 Noul
-> 实施状态：本文中的 advisor API、CLI、配置和 artifact 均为提案，尚未实现
+> 实施状态：开发分支已实现 Core run 绑定 Python 接口，尚未发布；advisor API、CLI、配置、授权与 artifact 流程仍为提案
 
 ## 摘要
 
@@ -430,7 +430,38 @@ run 切换、源绑定变化、包升级、超限、过期或撤销都使授权�
 初次读取同时用于解析和摘要；授权匹配直接比较该快照的绑定，不额外重复读取。保存请求与授权后，
 执行前重新解析目标根目录、重建源清单并核验内容摘要和 missing 状态，只读取相关小型源文件。
 正常调用只需构造和发送前复核两次有界快照读取；预览不执行发送前复核。实施验收记录代表性输入
-的字节数与两次读取耗时，当前不宣称已经完成性能测量，也不引入摘要缓存。
+的字节数与两次读取耗时，不引入跨快照摘要缓存。
+
+#### 开发分支实现
+
+`wavebench.services.advisor_run_binding` 提供 `BindingSource`、`capture_run_binding()`
+与 `verify_run_binding()`。`capture_run_binding()` 读取 `run.json` 及 Core 显式选定的源；返回快照的
+`read_json()` / `read_bytes()` 供输入提取使用，`as_dict()` 与 `binding_sha256` 供本地审计使用。
+读取在独立子进程中执行，超时终止读取进程。此接口不生成授权、不调用 advisor，也不写入 run。
+
+```python
+from wavebench.services.advisor_run_binding import (
+    BindingSource, capture_run_binding, verify_run_binding,
+)
+
+# 清单由版本化 Core 任务定义；示例允许 summary.json 缺失。
+sources = [BindingSource("summary.json", optional=True)]
+snapshot = capture_run_binding(
+    run_dir, task_id="triage", task_version="1", sources=sources, timeout_s=30,
+)
+summary = snapshot.read_json("summary.json")
+# Core 用快照构造并冻结请求，完成预览和授权后，发送前再次调用：
+verify_run_binding(snapshot, sources=sources, timeout_s=30)
+```
+
+源选择依赖当前 run 内容时，Core 须重新生成 `sources` 并传入复核；省略时按原清单复核。
+任一源的读取错误或绑定变化均抛出 `RunBindingError`，调用方必须停止发送。
+调用方负责传入阶段剩余时间，并检查请求、授权和目标的其它条件；以上示例不构成完整发送流程。
+
+2026-10-05 本机离线合成输入测量，每组运行 5 次，取中位数；计时含子进程启动、读取、
+进程间传输和摘要计算。总源字节数 4098 时，构造／复核分别为 49.8／49.6 ms；
+总源字节数 16777216（16 MiB）时分别为 207.5／210.8 ms。该结果不代表冷缓存、
+网络文件系统或其它平台的性能保证；原生 Windows 尚待验证。
 
 #### 失效与一致性边界
 
