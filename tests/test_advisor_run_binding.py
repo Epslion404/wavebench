@@ -263,6 +263,7 @@ def test_cumulative_byte_limit_exact_boundary_and_one_byte_over(run_dir):
 def test_changes_during_read_and_growth_past_budget_are_rejected(run_dir, monkeypatch, grow):
     path = run_dir / "source.json"
     path.write_bytes(b"123")
+    before = path.stat()
     fdopen = os.fdopen
     class ChangingReader:
         def __init__(self, handle):
@@ -278,6 +279,9 @@ def test_changes_during_read_and_growth_past_budget_are_rejected(run_dir, monkey
             if not self.changed:
                 self.changed = True
                 path.write_bytes(b"1234" if grow else b"456")
+                # Equal-size writes may share a timestamp on Windows; make the
+                # metadata change observable without relying on clock resolution.
+                os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000))
             return self.handle.read(n)
     monkeypatch.setattr(os, "fdopen", lambda fd, mode: ChangingReader(fdopen(fd, mode)))
     reason = "source_bytes_limit" if grow else "source_changed_during_read"
