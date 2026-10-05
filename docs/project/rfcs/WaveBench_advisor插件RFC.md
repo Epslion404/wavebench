@@ -3,8 +3,7 @@
 > 状态：`Draft`
 > 目标：为插件体系增加第二个类别 `advisor`，并把它与安全相关的通用能力（数据外发同意门、
 > decision artifact）收归 Core
-> 动机实现：TypeSafe Jev（System One model）这类输入应用状态、输出结构化判断的模型；
-> 答案类型包括 Choice、Score 和 Noul
+> 首版外部实现：TypeSafe Jev（System One model）；完整覆盖 Choice、Score 和 Noul
 > 实施状态：本文中的 advisor API、CLI、配置和 artifact 均为提案，尚未实现
 
 ## 摘要
@@ -13,6 +12,10 @@
 仪器语义，因此一个只做判断、没有 SCPI、没有型号的 advisor 无法注册。本 RFC 提出**插件类别
 （category）**这一层抽象，并新增第二个类别 `advisor`；同时把两类与安全相关的通用能力收归 Core，
 插件只提供实现。Core 不为任何厂商加特例分支。
+
+首版外部适配仅针对 Jev；Core 保留离线 `rule_advisor` 基线，不增加其它供应商的兼容协议。
+Jev 的 wire 格式与 HTTP 行为归适配器，Core 负责类型校验、授权、审计与建议展示。
+供应商范围是当前实施选择；后续扩展需另行评审，不在 Core 写入永久的供应商白名单。
 
 ## 约束
 
@@ -99,13 +102,24 @@ EgressDeclaration(
 Core 拥有这些名字与各自答案契约（Choice / Score / Noul 形状）；插件只提供实现。
 
 首版只冻结 `advisor.triage` 与外发声明；`route`、`cause` 和 `rank` 是后续候选，不进入首版
-capability 白名单。`advisor.triage` 使用 Choice 答案，Score / Noul 形状作为后续兼容边界记录。
+capability 白名单。capability 表示任务用途；Choice / Score / Noul 表示问题类型，三者均进入
+首版执行、校验与审计合同。同一请求可混合三种类型，各问题独立读取同一 state，不引用本次
+其它问题的答案；这一行为依据 [Jev primitives](https://docs.typesafe.ai/primitives)。
 
 ### 首版判断任务与规则基线
 
-首版任务是为已有采集报告提供人工复核建议：封闭选项为 `inspect_summary`、
-`inspect_waveform`、`insufficient_evidence`。输入只读取现有离线产物，不查询仪器。
+`capture-triage` 的完整示例使用以下三个问题提供人工复核建议；输入只读取现有离线产物，不查询仪器。
 建议不改变验收结果，不开启下一次采集，也不执行建议中的任何命令。
+
+| question id | 类型 | 任务判据 |
+| --- | --- | --- |
+| `triage` | Choice | 在 `inspect_summary`、`inspect_waveform`、`insufficient_evidence` 中选择复核入口 |
+| `review_priority` | Score | 由低到高的三个等级：常规复核、重点复核、优先补齐证据；分数表示复核优先级，不表示仪器危险程度 |
+| `needs_attention` | Noul | 当前记录是否需要额外关注；yes 包括采集证据缺失或质量告警，no 不代表实验验收通过 |
+
+问题集合、文案和评分判据由版本化任务模板确定，可选单种、多题或三类混合，不要求每次都发送
+示例中的三题。模板变更使已有授权失效；未包含的题目不要求返回。Jev 适配和公共 validator
+必须覆盖三类；规则基线只承诺已登记模板，未知模板在准备前明确拒绝，不伪造通用推理能力。
 
 Core 根据产物构造 `state.fields`：`capture_available`（布尔）、`quality_warnings`
 （现有质量分析产生的字符串列表）、`operator_note`（可选字符串）。文件路径、完整波形和设备
@@ -117,13 +131,15 @@ run 模式的状态由 Core 从目标产物构造；显式补充输入只能提�
 独立 fixture 使用 standalone 目标，不因内容与某个 run 相似就继承该 run 的授权。
 
 `rule_advisor` 的确定性基线：采集不可用时返回 `insufficient_evidence`；有质量告警时返回
-`inspect_waveform`；其它情况返回 `inspect_summary`。例如：
+`inspect_waveform`；其它情况返回 `inspect_summary`。对应 Score 分别为 2、1、0，等级分布为
+one-hot；Noul 在采集不可用或有告警时返回 1，其它情况返回 0。规则忽略人工备注，并明确
+记录该限制；Jev 可结合备注判断。规则不模拟供应商 confidence。例如：
 
 ```json
 {"capture_available": true, "quality_warnings": ["low_cycle_count"], "operator_note": ""}
 ```
 
-该输入的规则答案为 `inspect_waveform`。离线 fixture 至少覆盖采集缺失、有告警、无告警、
+该输入的规则答案为 `inspect_waveform`、Score 1 和 Noul 1。离线 fixture 至少覆盖采集缺失、有告警、无告警、
 缺字段和非法类型；缺字段与非法类型在调用前拒绝。基线返回对应选项的 one-hot 概率，表示
 确定性规则输出，不代表经过校准的统计置信度。
 
@@ -152,14 +168,14 @@ class Advisor(Protocol):
 # AdvisorContext: 不含仪器对象、transport 或凭据的本地配置
 # PreparedRequest: 规范化请求、HTTP method/URL、语义 headers、精确 body bytes；离线实现无 HTTP 字段
 # CallContext: 单调时钟 deadline、显式授权的凭据引用；不提供仪器控制接口
-# AdvisorResponse: schema_version, call_id, reported_model, answers
+# AdvisorResponse: schema_version, call_id, reported_model, answers, usage（可选）
 ```
 
 `schema_version` 首版为 `wavebench.advisor.request.v1` / `wavebench.advisor.response.v1`。
 `state` 为含 `fields` 和逐字段来源 `provenance` 的对象；`questions` 是问题数组，`answers`
 是以 question id 为键的对象。target 和 Core 的 call_id 只用于本地审计与关联，不进入
 provider body；响应中的 call_id 由适配器从本次执行上下文补入。provider body 不自动携带
-run 身份或本地 call 路径。首版 triage 只包含 id 为 `triage` 的一个 Choice 问题，其答案示例如下：
+run 身份或本地 call 路径。完整三题模板的规则答案示例如下，等级文本必须与任务模板一致：
 
 ```json
 {
@@ -170,10 +186,14 @@ run 身份或本地 call 路径。首版 triage 只包含 id 为 `triage` 的一
     "triage": {
       "type": "choice",
       "choice": "inspect_waveform",
-      "probabilities": {"inspect_summary": 0, "inspect_waveform": 1, "insufficient_evidence": 0},
-      "confidence": 1,
-      "confidence_definition": "deterministic-rule.v1"
-    }
+      "probabilities": {"inspect_summary": 0, "inspect_waveform": 1, "insufficient_evidence": 0}
+    },
+    "review_priority": {
+      "type": "score", "score": 1,
+      "legend": {"0": "常规复核", "1": "重点复核", "2": "优先补齐证据"},
+      "probabilities": {"0": 0, "1": 1, "2": 0}
+    },
+    "needs_attention": {"type": "noul", "probability_yes": 1}
   }
 }
 ```
@@ -197,37 +217,133 @@ Core 将加载、构造、准备和执行放入可终止的独立 worker，按�
 这是一份可信本地插件合同。worker 用于超时控制，不提供任意 Python 代码的网络隔离；
 恶意插件仍可能自行联网。包的信任、安装策略和代码审查是前置条件，同意门不能充当沙箱。
 
+### Jev 适配与官方依据
+
+以下 wire 映射于 2026-10-05 核对 [HTTP API](https://docs.typesafe.ai/api)、
+[Choice](https://docs.typesafe.ai/primitives/choice)、[Score](https://docs.typesafe.ai/primitives/score)
+与 [Noul](https://docs.typesafe.ai/primitives/noul) 文档；属于拟定适配合同，未调用真实服务验收。
+
+`prepare()` 生成发往 `https://api.typesafe.ai/v1/systemone` 的单次 POST。body 只含 `model`、
+`state`、`questions`：`requested_model` 映射为 model，state 取经批准的 `state.fields`，
+问题数组按 id 转为 questions map，每项保留 type、instructions、criteria 并移除本地 id。
+本地 provenance、target、call_id 与源绑定不进入 body；问题和结构化判据中的业务数据同样
+接受完整预览与授权。当前文档对应的适配版本没有额外 inference_parameters，非空时在准备
+阶段拒绝；后续按新适配版本显式映射官方支持的参数，不能静默忽略或未经预览追加。
+
+单个问题与三类混合请求使用同一映射。下面是混合请求的 questions 片段示例；所有文本均为
+WaveBench 任务模板，不是额外的供应商参数，独立问题不得依赖 question id 隐含的语义：
+
+```json
+{
+  "triage": {
+    "type": "choice", "instructions": "根据采集记录和备注，选择人工复核入口。",
+    "criteria": {"inspect_summary": "记录可用且适合先看摘要", "inspect_waveform": "应重点检查波形", "insufficient_evidence": "先补齐采集证据"}
+  },
+  "review_priority": {
+    "type": "score", "instructions": "根据记录可用性、告警与备注，评估人工复核优先级。",
+    "criteria": ["常规复核", "重点复核", "优先补齐证据"]
+  },
+  "needs_attention": {
+    "type": "noul", "instructions": "当前采集记录是否需要额外关注？",
+    "criteria": {"true": "证据缺失、存在质量告警或备注提示需关注", "false": "现有记录与备注未提示额外关注事项"}
+  }
+}
+```
+
+响应的 model 原样记录为 `reported_model`；Choice / Score 的 confidence 映射为
+`provider_confidence`，Noul 的 noul 映射为 `probability_yes`；其它答案字段保持语义。
+Score 的 HTTP legend／probabilities 使用十进制字符串等级键；若采用 SDK，整数键仅在适配
+边界转换为规范字符串，禁止转换后出现重复键或改变等级顺序。usage 只保存经校验的非负整数
+token 计数。`advisory` 同时记录 advisor、插件版本、requested/reported model 和任务版本。
+
+以下是适配后的三题 answers 示例（人工构造，用于离线验收，不代表实测模型效果）：
+
+```json
+{
+  "triage": {
+    "type": "choice", "choice": "inspect_waveform",
+    "probabilities": {"inspect_summary": 0.1, "inspect_waveform": 0.8, "insufficient_evidence": 0.1},
+    "provider_confidence": 0.7
+  },
+  "review_priority": {
+    "type": "score", "score": 1.25,
+    "legend": {"0": "常规复核", "1": "重点复核", "2": "优先补齐证据"},
+    "probabilities": {"0": 0, "1": 0.75, "2": 0.25},
+    "provider_confidence": 0.63
+  },
+  "needs_attention": {"type": "noul", "probability_yes": 0.1}
+}
+```
+
+该示例的 Core 指标分别为 0.8、0.75、0.8；Noul 倾向 no，Score 保持 1.25，不取整也不裁剪到 1。
+供应商 confidence 按原响应保留，不作为等式校验或上述指标的输入。
+
+效果评估使用显式固定模型版本；交互调用可显式选择别名，但实际返回版本不能继承旧版本的
+校准结论。阈值配置关联实际模型与任务版本；无匹配配置时保存合法答案并强制人工复核，
+不得猜测默认阈值。别名的实际版本只能在响应后观察，不据此重发请求或补做隐式模型查询。
+
+适配器将非 2xx（含 401、422、429、529）记录为 `execution_failed` 与清理后的 HTTP 原因；
+成功响应若缺答案、类型不符或不能完整解析则为 `invalid_response`，超时沿用 `timeout`。
+不填充替代答案、不消费部分结果。官方 SDK 支持重试；若采用 Python SDK，须配置
+`RetryPolicy(max_retries=0)`，见[重试定义](https://docs.typesafe.ai/sdk/python/api/retries)。
+还必须验证传输层没有自动重试／重定向且实际字节与 prepare 一致；无法保证时采用能发送精确
+body bytes 的 HTTP 路径。三种问题混合仍只消费一次调用额度，不拆成三个请求。
+
 ### 请求与答案校验
 
 请求中的 task 与 question id 非空且唯一；状态字段必须符合版本化任务 schema，拒绝未知字段、
-重复 JSON key、非法类型及非有限数字。每个问题包含 `id`、`type`、`instructions` 与
-`options` 或 `levels`；候选 id 唯一，至少两个选项或等级，判据必须为字符串。
-Score 等级使用按顺序编号的 `0..n-1`，不能由插件改变顺序。
+重复 JSON key、非法类型及非有限数字。每个问题包含 `id`、`type`、`instructions`，按类型
+提供 criteria；instructions 接受字符串、JSON 对象或数组，嵌套数据也属于预览与授权范围。
+
+| 问题类型 | criteria 合同 |
+| --- | --- |
+| Choice | 必填选项映射；选项 id 非空且唯一，WaveBench 要求 2～255 项；判据为字符串、对象、数组或 null |
+| Score | 必填有序判据数组，2～10 项；每项为字符串、对象或数组，等级按原序为 `0..n-1` |
+| Noul | 可省略；存在时为包含且仅包含字符串键 `true`、`false` 的对象，两个判据均为字符串、对象或数组；不要求 options／levels |
+
+表中选项／等级上限是本次核对的 Jev 适配限制，由适配版本维护，不成为其它未来实现的永久
+Core 常量。固定答案类型与完整性规则由 Core 校验，供应商限额在 prepare 前检查。
 
 | 答案类型 | 必填字段 | 校验与解释 |
 | --- | --- | --- |
-| Choice | `choice`、`probabilities`、`confidence`、`confidence_definition` | choice 必须属于候选集且为最高概率选项；probabilities 必须恰好覆盖全部选项 |
-| Score | `score`、`probabilities`、`confidence`、`confidence_definition` | 概率键恰好覆盖全部等级；score 是等级的概率加权平均，须位于等级范围内 |
-| Noul | `probability_yes` | 只有 yes 概率，无供应商 confidence；不得填充或伪造 confidence |
+| Choice | `type="choice"`、`choice`、`probabilities` | choice 属于候选集且为最高概率选项之一；分布恰好覆盖全部选项 |
+| Score | `type="score"`、`score`、`legend`、`probabilities` | legend 与分布的键恰好为 `"0".."n-1"`；legend 值与对应请求判据结构相等；score 为等级的概率加权平均，位于 `[0,n-1]`，可为小数 |
+| Noul | `type="noul"`、`probability_yes` | 只有 yes 概率；不要求概率映射，不得填充或伪造供应商 confidence |
 
-所有概率和 confidence 都必须是 `[0,1]` 内的有限数字，bool 不视为数字；概率分布总和与 1 的
-差必须不大于 `1e-6`，Core 不静默归一化。Score 均值误差同样不大于 `1e-6`。
-缺失答案、未知选项、额外 question、非法数值、无效分布或无法识别的
-`confidence_definition` 均使整次响应为 `invalid_response`，不接受部分答案。
+所有概率及提供的 `provider_confidence` 都必须是 `[0,1]` 内的有限数字，bool 不视为数字；
+Score 本身只受 `[0,n-1]` 约束，不能套用概率上限。概率分布总和与 1 的差及 Score 加权均值
+误差均不大于 `1e-6`，不静默归一化或修正答案。这是 WaveBench 的校验容差，不是供应商的
+精度保证；适配验收须使用保留精度的响应 fixture，发现不兼容时先修订合同，不能暗中扩大容差。
+响应类型须匹配问题；缺失／额外答案、未知选项、非法数值、错误 legend 或无效分布使整次响应
+为 `invalid_response`。单题错误不得降级成其它题成功，合法的不同题判断也不必相互推导一致。
 
 供应商的 confidence 与最高概率不是同一指标。TypeSafe Jev 的 Choice / Score 返回
-confidence，Noul 只返回概率，见[官方定义](https://docs.typesafe.ai/confidence)。适配器需声明
-指标定义及版本；Core 的定义白名单包含 TypeSafe Choice / Score 和确定性规则输出，并
-对已知公式从概率重新计算核对。provider 定义变化需更新适配器和合同版本，不能借用原定义名。
+confidence，Noul 只返回概率，见[官方定义](https://docs.typesafe.ai/confidence)。Jev 适配器
+必须检查 Choice / Score 原生 confidence 存在且合法，再保存为 `provider_confidence`；Noul
+没有此字段。Core 不维护供应商公式白名单、不复算或覆盖该值，它只用于审计和效果比较。
+规则实现省略该字段；Core 不要求 `confidence_definition`。插件版本与实际模型版本标识来源，
+不得把确定性规则的 one-hot 或供应商 confidence 描述为经过 WaveBench 数据校准的正确率。
 
-每个 question 的 Core 配置明确 `metric`、`review`、`accept`，满足
-`0 <= review <= accept <= 1`，禁止依赖跨问题的隐式全局阈值。默认指标是 Choice 的
-`top_probability`、Score 的 `confidence`、Noul 的 `distance_from_half = abs(2*p-1)`。
-Choice 概率并列最高时强制人工复核；Noul 以 `p >= 0.5` 表示 yes、否则 no，恰好 0.5 也强制复核。
+每个 question 的 Core 配置明确 `review`、`accept`，满足 `0 <= review <= accept <= 1`；
+禁止依赖跨问题、模型版本的隐式全局阈值。首版模板采用如下通用指标，不增加可选公式注册系统；
+后续任务可通过有明确公式、版本与评估依据的策略修订调整指标，而不改写供应商原始答案：
 
-指标达到 accept 只标为 `suggestion_ready`；位于 review 与 accept 之间标为
-`human_review`；低于 review 标为 `insufficient_evidence`。这些标签仅控制展示和人工复核，
+| 类型 | Core 指标与定义版本 | 展示含义 |
+| --- | --- | --- |
+| Choice | `top_probability` / `wavebench.top_probability.v1`：`max(probabilities.values())` | 所选选项概率；并列最高强制人工复核 |
+| Score | `top_probability` / `wavebench.top_probability.v1`：`max(probabilities.values())` | 最可能等级的集中程度；独立展示原始小数 score，不能把 `score/(n-1)` 当置信度；并列最高强制人工复核 |
+| Noul | `distance_from_half` / `wavebench.distance_from_half.v1`：`abs(2*p-1)` | 对 yes／no 的确定程度；`p>0.5` 为 yes，`p<0.5` 为 no，等于 0.5 不给方向并强制复核 |
+
+Score 指标是 WaveBench 的保守展示策略，不等同于 Jev 考虑等级距离的 confidence，也不证明
+加权 score 的正确率；即使均值相同，不同分布仍保留分别审查。Noul 的方向与确定程度分开，
+接近 0 表示明确倾向 no，不应误报低置信。人工复核覆盖阈值判断，即使 accept 配为 0 也不能绕过。
+
+指标 `>= accept` 只标为 `suggestion_ready`；`review <= metric < accept` 标为
+`human_review`；`metric < review` 标为 `insufficient_evidence`。这些标签仅控制展示和人工复核，
 不启动实验操作，不改变安全门或质量门。指标、阈值和定义版本均保存到 artifact。
+模型答案与展示标签分别保存：例如高概率的 `insufficient_evidence` 选项可以获得
+`suggestion_ready` 标签，表示可展示「补齐证据」建议，不表示采集通过。问题逐题展示，
+不合成为实验 pass/fail；缺少匹配的阈值配置时，metric 仍可计算，但标签只能为 `human_review`。
 
 ### 数据外发同意门（Core 拥有）
 
@@ -338,8 +454,8 @@ run 切换、源绑定变化、包升级、超限、过期或撤销都使授权�
 ### Decision artifact（Core 拥有）
 
 - schema `wavebench.decision.v1`，写入对应 run 目录的 `decisions/`，或显式独立审计目录，附加式；
-- 内容：target（本地 run 绑定及任务选择，或 standalone 调用）、advisory（requested/reported model、duration）、consent、state、
-  questions、answers（含概率与 confidence）、thresholds、recommendations；
+- 内容：target（本地 run 绑定及任务选择，或 standalone 调用）、advisory（advisor／插件／任务版本、requested/reported model、duration、usage）、consent、state、
+  questions、answers（各类型字段及适用时的 provider_confidence）、Core metrics、thresholds、recommendations；
 - 每问题的指标与 accept/review 展示阈值由 Core 配置拥有，不交给插件；
 - 写盘沿用既有 Windows 原子替换与重试约定；文件名含 UTC 时间戳与 advisor id，独占创建；
 - 本次不并入 `run report`。
@@ -372,7 +488,8 @@ run 调用另保存完整绑定与源清单；`consent.json` 保存授权或拒�
 
 Core 内置 `rule_advisor`：纯规则、零依赖、`transmits_off_machine=False`。用于：让新类别在 CI 与
 离线下可测；提供效果比较的确定性基线；给第三方最小样例。合同测试中的第二个实现采用独立
-fake provider，复用相同 validator，并记录 `prepare` / `execute` 次数与最终发送字节。
+fake Jev provider，复用相同 validator，覆盖三类独立请求及混合响应，并记录 `prepare` /
+`execute` 次数与最终发送字节。fake HTTP 边界验证 Jev 适配行为，不要求离线 CI 安装第三方 SDK。
 
 ### CLI 面
 
@@ -411,6 +528,8 @@ run 模式的 `--state` 仅接受可选 `operator_note`，其它字段拒绝；s
 | 4 | 同意门粒度 | 默认按次绑定请求摘要与本地目标；run 级绑定目录及源快照，仅按显式模板允许补充字段变化，每次仍校验限额并记录精确摘要 |
 | 5 | `advisor.external_state` 是否纳入 access policy | 本次不纳入；由 `[advisor]` 配置 + 同意门控制 |
 | 6 | decision artifact 是否并入 `run report` | 本次不并入；只落盘，插件自渲染摘要 |
+| 7 | 首版外部适配及问题类型 | Jev 的 Choice / Score / Noul 全部覆盖；问题集合由版本化任务模板选择 |
+| 8 | confidence 与展示指标 | Jev confidence 保留供审计；Core 从答案计算版本化指标，不维护供应商公式白名单 |
 
 上述结论是本提案的裁决建议，`Draft` 状态下尚不构成对外承诺；第 5、6 条是未来设计，不作为当前能力。
 
@@ -428,7 +547,11 @@ run 模式的 `--state` 仅接受可选 `operator_note`，其它字段拒绝；s
 - 快照复核：确认后源变化、读取失败或超限均为 not_sent、零 execute；结果保存失败原因及可用的摘要，不覆盖原请求／授权，不自动刷新或重发；run.json 原始字节不变；
 - 输入与成本：run 模式拒绝 fixture 覆盖派生字段；摘要与解析消费同一份字节；条目数 32 与累计字节 16 MiB 的边界及超限均有离线用例，不遍历目录或读取大体积波形，记录代表性两次读取的耗时与字节数；
 - 授权限额：两个并发调用不能同时消费最后一次额度；源绑定相同也不能绕过撤销、过期或请求模板变化，复制审计文件不能恢复有效授权；
-- 答案：缺失与额外答案、未知选项、NaN/Inf、bool、错误分布和未知 confidence 定义均返回 invalid_response；并列最高与低置信指标不形成可直接采用的建议；
+- 三类请求：Choice 单题、Score 单题、无 criteria 的 Noul、有 criteria 的 Noul 及三类混合均有 fixture；结构化判据、Choice 2／255／256 项、Score 2／10／11 级、重复 id 与未知类型覆盖接受和拒绝边界；
+- 三类答案：Score 小数及大于 1 的合法分数、完整 legend、SDK 等级键转换与冲突，Noul 的 0／0.5／1 均验证；缺失／额外答案、类型不符、未知选项、NaN/Inf、bool、错误分布与 legend 均拒绝，单题错误使混合调用失败；
+- confidence：Jev Choice／Score 原生字段缺失或非法时拒绝，合法值原样映射且不改变 Core 指标；Noul 与规则实现不伪造 provider_confidence，不要求 confidence_definition；
+- 展示：Choice／Score 并列最高、Noul 为 0.5 或缺少匹配阈值配置时强制复核；Noul 接近 0 展示 no；低置信标签与模型选项分别保存，Score 同均值不同分布不合并；
+- Jev 适配：model／state／questions 精确映射并受预览摘要约束；混合问题只发一次，401／422／429／529／超时不自动重试；SDK 或 HTTP 实际发送字节与 prepare 一致，别名实际返回版本如实记录；
 - artifact：run 与独立调用均独占创建记录，不改 `run.json`/`summary.csv`/`steps/*`；目标缺失或不可写时零插件调用；
 - 失败：准备、执行、超时、取消及响应校验失败均保留审计终态；发送后结果写入失败保留未完成记录并返回非零，不自动重试；凭据不出现在记录或清理后的错误中；
 - 边界：advisor 结果不得影响 `run.json.status`、质量门、`auto_recover`、capability/access policy；
@@ -438,9 +561,9 @@ run 模式的 `--state` 仅接受可选 `operator_note`，其它字段拒绝；s
 
 | 阶段 | 内容 |
 | --- | --- |
-| 1 | 独立 advisor registry + descriptor/factory/执行协议 + 请求与答案 validator + triage 规则与 fake provider |
+| 1 | 独立 advisor registry + descriptor/factory/执行协议 + 三类请求与答案 validator + 版本化任务模板、triage 规则与 fake Jev provider |
 | 2 | 完整请求同意门 + 有界 run 源快照绑定与发送前复核 + run/独立调用审计写入器 + 每问题阈值配置 + 超时与失败处理 |
-| 3 | `package_inspect` / `lifecycle` 支持 advisor 包 + `advisor ask` |
+| 3 | `package_inspect` / `lifecycle` 支持 advisor 包 + `advisor ask` + 插件侧 Jev 三类问题适配与离线 HTTP 合同验收 |
 | 4 | 文档（Development、Reference、概念页）与 RFC 索引登记 |
 
 阶段 1 与 2 不依赖网络与第三方 SDK，可合并为一个可离线验证的改动；阶段 3 触及生命周期，建议单独评审。
