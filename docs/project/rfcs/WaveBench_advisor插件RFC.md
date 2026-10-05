@@ -8,7 +8,7 @@
 
 ## 摘要
 
-现有插件体系只有"仪器插件"一类：`kind`、capability 前缀、descriptor 校验和生命周期后校验全部绑定
+现有插件体系只有「仪器插件」一类：`kind`、capability 前缀、descriptor 校验和生命周期后校验全部绑定
 仪器语义，因此一个只做判断、没有 SCPI、没有型号的 advisor 无法注册。本 RFC 提出**插件类别
 （category）**这一层抽象，并新增第二个类别 `advisor`；同时把两类与安全相关的通用能力收归 Core，
 插件只提供实现。Core 不为任何厂商加特例分支。
@@ -111,7 +111,7 @@ capability 白名单。capability 表示任务用途；Choice / Score / Noul 表
 `capture-triage` 的完整示例使用以下三个问题提供人工复核建议；输入只读取现有离线产物，不查询仪器。
 建议不改变验收结果，不开启下一次采集，也不执行建议中的任何命令。
 
-| question id | 类型 | 任务判据 |
+| question ID | 类型 | 任务判据 |
 | --- | --- | --- |
 | `triage` | Choice | 在 `inspect_summary`、`inspect_waveform`、`insufficient_evidence` 中选择复核入口 |
 | `review_priority` | Score | 由低到高的三个等级：常规复核、重点复核、优先补齐证据；分数表示复核优先级，不表示仪器危险程度 |
@@ -152,7 +152,7 @@ Core 验证套件使用同一任务模板、请求和答案 validator 测试 `ru
 ### 最小执行协议
 
 `wavebench.advisor` entry point 返回一个 `AdvisorPlugin` descriptor，或无参数、返回该
-descriptor 的函数。entry point 名必须等于 `advisor_id`；重复 id、未知 API 版本、未知
+descriptor 的函数。entry point 名必须等于 `advisor_id`；重复 ID、未知 API 版本、未知
 capability 和不可调用的 factory 在加载期拒绝。独立 advisor registry 校验 descriptor，
 不复用仪器的 `models` 或 backend 要求。
 
@@ -173,7 +173,7 @@ class Advisor(Protocol):
 
 `schema_version` 首版为 `wavebench.advisor.request.v1` / `wavebench.advisor.response.v1`。
 `state` 为含 `fields` 和逐字段来源 `provenance` 的对象；`questions` 是问题数组，`answers`
-是以 question id 为键的对象。target 和 Core 的 call_id 只用于本地审计与关联，不进入
+是以 question ID 为键的对象。target 和 Core 的 call_id 只用于本地审计与关联，不进入
 provider body；响应中的 call_id 由适配器从本次执行上下文补入。provider body 不自动携带
 run 身份或本地 call 路径。完整三题模板的规则答案示例如下，等级文本必须与任务模板一致：
 
@@ -206,7 +206,7 @@ run 身份或本地 call 路径。完整三题模板的规则答案示例如下�
 `execute()` 必须使用已准备的 method、URL、语义 headers 和原始 body bytes，禁止再次
 序列化、补充上下文、改变模型、自动重试或跟随重定向。仅允许传输层补充 Content-Length 等
 机械 headers，以及显式凭据引用对应的认证 header；认证内容不得承载额外业务数据。
-响应必须覆盖全部 question id，禁止未知答案；Core 独立校验后才生成建议。
+响应必须覆盖全部 question ID，禁止未知答案；Core 独立校验后才生成建议。
 
 Core 将加载、构造、准备和执行放入可终止的独立 worker，按阶段施加有限的超时；调用方只能设置
 有限正数 `timeout_s`，默认 30 秒，限定加载与准备阶段的合计预算，以及授权后执行阶段的预算，
@@ -225,13 +225,13 @@ Core 将加载、构造、准备和执行放入可终止的独立 worker，按�
 
 `prepare()` 生成发往 `https://api.typesafe.ai/v1/systemone` 的单次 POST。body 只含 `model`、
 `state`、`questions`：`requested_model` 映射为 model，state 取经批准的 `state.fields`，
-问题数组按 id 转为 questions map，每项保留 type、instructions、criteria 并移除本地 id。
+问题数组按 `id` 转为 questions map，每项保留 type、instructions、criteria 并移除本地 `id`。
 本地 provenance、target、call_id 与源绑定不进入 body；问题和结构化判据中的业务数据同样
 接受完整预览与授权。当前文档对应的适配版本没有额外 inference_parameters，非空时在准备
 阶段拒绝；后续按新适配版本显式映射官方支持的参数，不能静默忽略或未经预览追加。
 
 单个问题与三类混合请求使用同一映射。下面是混合请求的 questions 片段示例；所有文本均为
-WaveBench 任务模板，不是额外的供应商参数，独立问题不得依赖 question id 隐含的语义：
+WaveBench 任务模板，不是额外的供应商参数，独立问题不得依赖 question ID 隐含的语义：
 
 ```json
 {
@@ -291,13 +291,13 @@ body bytes 的 HTTP 路径。三种问题混合仍只消费一次调用额度，
 
 ### 请求与答案校验
 
-请求中的 task 与 question id 非空且唯一；状态字段必须符合版本化任务 schema，拒绝未知字段、
+请求中的 task 与 question ID 非空且唯一；状态字段必须符合版本化任务 schema，拒绝未知字段、
 重复 JSON key、非法类型及非有限数字。每个问题包含 `id`、`type`、`instructions`，按类型
 提供 criteria；instructions 接受字符串、JSON 对象或数组，嵌套数据也属于预览与授权范围。
 
 | 问题类型 | criteria 合同 |
 | --- | --- |
-| Choice | 必填选项映射；选项 id 非空且唯一，WaveBench 要求 2～255 项；判据为字符串、对象、数组或 null |
+| Choice | 必填选项映射；选项 ID 非空且唯一，WaveBench 要求 2～255 项；判据为字符串、对象、数组或 null |
 | Score | 必填有序判据数组，2～10 项；每项为字符串、对象或数组，等级按原序为 `0..n-1` |
 | Noul | 可省略；存在时为包含且仅包含字符串键 `true`、`false` 的对象，两个判据均为字符串、对象或数组；不要求 options／levels |
 
@@ -387,8 +387,8 @@ run 切换、源绑定变化、包升级、超限、过期或撤销都使授权�
 
 ### run 输入快照绑定
 
-绑定用于确认本地实验目录与此次实际消费的输入内容。现有 `run.json` 不保证携带唯一 run id；
-目录名、experiment name、plan hash 及展示用 id 均不能替代授权绑定。Core 不修改已有
+绑定用于确认本地实验目录与此次实际消费的输入内容。现有 `run.json` 不保证携带唯一 run ID；
+目录名、experiment name、plan hash 及展示用 ID 均不能替代授权绑定。Core 不修改已有
 `run.json`，也不向原始产物补写 UUID；standalone 继续以 `call_id` 标识调用。
 
 `run_binding` 的首版字段如下；`binding_sha256` 单独保存，不参与自身的计算。
@@ -488,7 +488,7 @@ verify_run_binding(snapshot, sources=sources, timeout_s=30)
 - 内容：target（本地 run 绑定及任务选择，或 standalone 调用）、advisory（advisor／插件／任务版本、requested/reported model、duration、usage）、consent、state、
   questions、answers（各类型字段及适用时的 provider_confidence）、Core metrics、thresholds、recommendations；
 - 每问题的指标与 accept/review 展示阈值由 Core 配置拥有，不交给插件；
-- 写盘沿用既有 Windows 原子替换与重试约定；文件名含 UTC 时间戳与 advisor id，独占创建；
+- 写盘沿用既有 Windows 原子替换与重试约定；文件名含 UTC 时间戳与 advisor ID，独占创建；
 - 本次不并入 `run report`。
 
 `advisor ask` 必须恰好指定一个目标：`--run-dir` 指向含可验证 `run.json` 的已有 run，或
@@ -498,8 +498,8 @@ verify_run_binding(snapshot, sources=sources, timeout_s=30)
 每次调用创建独占的 call 子目录；其中 `request.json` 保存校验后的请求、精确预览与摘要，
 run 调用另保存完整绑定与源清单；`consent.json` 保存授权或拒绝，并关联 `binding_sha256`、
 本地 target 与本次请求摘要，`result.json` 保存终态。每个文件只写一次，使用既有原子
-写入约定；预览也保存 `preview_only` 结果。call 目录使用 UTC 时间、经校验的 advisor id
-和随机 call id，不能由插件提供路径片段。
+写入约定；预览也保存 `preview_only` 结果。call 目录使用 UTC 时间、经校验的 advisor ID
+和随机 call ID，不能由插件提供路径片段。
 
 授权与请求记录必须在发送前持久化成功。终态覆盖 `completed`、`preview_only`、
 `denied`、`prepare_failed`、`execution_failed`、`timeout`、`invalid_response`、`cancelled`；
@@ -547,7 +547,7 @@ run 模式的 `--state` 仅接受可选 `operator_note`，其它字段拒绝；s
 - 现有 V2 仪器插件的公开契约、entry point group 和账本解释保持兼容；包检查与生命周期新增独立 advisor 分支；
 - 已安装插件不受影响；新增 advisor registry 不改变 V2 instrument registry 或 V1 metadata registry 的返回合同；
 - 新类别使用独立版本门；advisor 插件对 Core 的版本门由实施版本决定；
-- 一个包首版只允许声明一个类别；从"禁止混装"放宽到"允许"是向后兼容的，反向不是。
+- 一个包首版只允许声明一个类别；从「禁止混装」放宽到「允许」是向后兼容的，反向不是。
 
 ## 决策（提案结论）
 
@@ -575,10 +575,10 @@ run 模式的 `--state` 仅接受可选 `operator_note`，其它字段拒绝；s
 - 请求一致性：fake provider 捕获的 method、URL、语义 headers 与 body bytes 必须与预览摘要一致；问题、候选项、判据或模型变化均不能复用按次授权；
 - 同意范围：按次同意只消费一次；run 级仅允许声明的补充 state 路径变化，run／源快照切换、过期、包升级、超限与撤销均拒绝；非交互入口不复用授权；
 - run 绑定：同目录同任务同源字节及等价路径绑定一致；同名不同目录、移动／复制目录、源内容或 missing 状态变化均失效；新增 decisions、修改未消费文件或 mtime 不影响绑定；同路径同字节替换视为相同；
-- 快照复核：确认后源变化、读取失败或超限均为 not_sent、零 execute；结果保存失败原因及可用的摘要，不覆盖原请求／授权，不自动刷新或重发；run.json 原始字节不变；
+- 快照复核：确认后源变化、读取失败或超限均为 not_sent、零 execute；结果保存失败原因及可用的摘要，不覆盖原请求／授权，不自动刷新或重发；`run.json` 原始字节不变；
 - 输入与成本：run 模式拒绝 fixture 覆盖派生字段；摘要与解析消费同一份字节；条目数 32 与累计字节 16 MiB 的边界及超限均有离线用例，不遍历目录或读取大体积波形，记录代表性两次读取的耗时与字节数；
 - 授权限额：两个并发调用不能同时消费最后一次额度；源绑定相同也不能绕过撤销、过期或请求模板变化，复制审计文件不能恢复有效授权；
-- 三类请求：Choice 单题、Score 单题、无 criteria 的 Noul、有 criteria 的 Noul 及三类混合均有 fixture；结构化判据、Choice 2／255／256 项、Score 2／10／11 级、重复 id 与未知类型覆盖接受和拒绝边界；
+- 三类请求：Choice 单题、Score 单题、无 criteria 的 Noul、有 criteria 的 Noul 及三类混合均有 fixture；结构化判据、Choice 2／255／256 项、Score 2／10／11 级、重复 ID 与未知类型覆盖接受和拒绝边界；
 - 三类答案：Score 小数及大于 1 的合法分数、完整 legend、SDK 等级键转换与冲突，Noul 的 0／0.5／1 均验证；缺失／额外答案、类型不符、未知选项、NaN/Inf、bool、错误分布与 legend 均拒绝，单题错误使混合调用失败；
 - confidence：Jev Choice／Score 原生字段缺失或非法时拒绝，合法值原样映射且不改变 Core 指标；Noul 与规则实现不伪造 provider_confidence，不要求 confidence_definition；
 - 展示：Choice／Score 并列最高、Noul 为 0.5 或缺少匹配阈值配置时强制复核；Noul 接近 0 展示 no；低置信标签与模型选项分别保存，Score 同均值不同分布不合并；
@@ -603,7 +603,7 @@ run 模式的 `--state` 仅接受可选 `operator_note`，其它字段拒绝；s
 
 - advisor 不参与任何写路径、安全门、质量门、capability 判定；
 - 不为某个厂商在 Core 内加特例分支；
-- 不提供"advisor 自动执行建议"的路径：建议始终由操作者显式执行。
+- 不提供「advisor 自动执行建议」的路径：建议始终由操作者显式执行。
 
 ## 风险
 
